@@ -1,3 +1,12 @@
+//! High-Performance Event Sessionization & Attribution Engine
+//!
+//! Pipeline Overview:
+//! 1. Parallel manifest discovery and file chunking
+//! 2. Vectorized streaming parser with SIMD timestamp and key unpacking
+//! 3. Cache-coherent hash partitioning and record dedup
+//! 4. User identity resolution and click-event link graph union
+//! 5. Interval-merged click attribution with parallel Parquet serialization
+
 #![allow(dead_code, static_mut_refs, unused_unsafe)]
 mod manifest_setup;
 mod click_indexer;

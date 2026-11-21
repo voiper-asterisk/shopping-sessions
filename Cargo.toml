@@ -1,7 +1,9 @@
 [package]
 name = "shopping-sessions"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
+authors = ["voiper-asterisk <voiper.asterisk@users.noreply.github.com>"]
+description = "High-throughput parallel sessionization and attribution engine"
 publish = false
 
 [[bin]]
