@@ -815,11 +815,15 @@ unsafe impl std::alloc::GlobalAlloc for Alloc {
     }
 }
 
+pub static mut TIMING_ENABLED: bool = false;
 pub static mut LAPS: Vec<(&'static str, f64)> = Vec::new();
 pub static mut LAST: Option<std::time::Instant> = None;
 #[allow(static_mut_refs)]
 pub fn lap(name: &'static str) {
     unsafe {
+        if !TIMING_ENABLED {
+            return;
+        }
         let now = std::time::Instant::now();
         if let Some(l) = LAST {
             LAPS.push((name, (now - l).as_secs_f64() * 1e3));

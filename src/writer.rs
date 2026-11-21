@@ -374,10 +374,15 @@ fn write_campaign_part(g: &G, path: &Path, lo: usize, hi: usize) -> [i64; 4] {
 }
 
 fn clear_stale(dir: &Path) {
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        for e in rd.flatten() {
-            if e.file_name().as_encoded_bytes().ends_with(b".parquet") {
-                let _ = std::fs::remove_file(e.path());
+    if let Ok(mut rd) = std::fs::read_dir(dir) {
+        if rd.next().is_none() {
+            return;
+        }
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                if e.file_name().as_encoded_bytes().ends_with(b".parquet") {
+                    let _ = std::fs::remove_file(e.path());
+                }
             }
         }
     }

@@ -78,7 +78,7 @@ fn list(dir: &Path) -> Vec<(std::path::PathBuf, usize)> {
         if !name.as_encoded_bytes().ends_with(b".csv") {
             continue;
         }
-        let Ok(md) = std::fs::metadata(&p) else { continue };
+        let Ok(md) = e.metadata() else { continue };
         if md.is_file() {
             v.push((p, md.len() as usize));
         }

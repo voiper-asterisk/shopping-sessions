@@ -321,6 +321,7 @@ fn main() {
     let nt: usize = std::env::var("NCPU").ok().and_then(|s| s.trim().parse().ok()).filter(|&n| n > 0).unwrap_or(8).min(16);
     let timing = std::env::var("XL_TIMING").is_ok_and(|v| v == "1");
     let check = std::env::var("XL_CHECK").is_ok_and(|v| v == "1");
+    unsafe { sys::TIMING_ENABLED = timing || check; };
     if std::env::var("XL_NOHUGE").is_ok_and(|v| v == "1") {
         HUGE.store(false, std::sync::atomic::Ordering::Relaxed);
     }
