@@ -703,7 +703,7 @@ const GEN_MAX: u64 = {
 const PF_CHUNK: bool = true;
 const RC_NOALL: bool = option_env!("XL_RCNOALL").is_some();
 const GB_MAX: usize = crate::env_u32(option_env!("XL_GBMAX"), 1 << 31) as usize;
-const XRC: usize = crate::env_u32(option_env!("XL_XRC"), 4) as usize;
+const XRC: usize = crate::env_u32(option_env!("XL_XRC"), 2) as usize;
 const M31: u32 = 0x7FFF_FFFF;
 const FLAG: u32 = 0x8000_0000;
 const NONE: u32 = u32::MAX;
@@ -2412,7 +2412,7 @@ fn shares(g: &G, pool: &Pool, old: bool) -> Vec<Share> {
     }
     v
 }
-const SLAB_ROWS: usize = crate::env_u32(option_env!("XL_SLABROWS"), 13) as usize;
+const SLAB_ROWS: usize = crate::env_u32(option_env!("XL_SLABROWS"), 12) as usize;
 const CXR_DIV: usize = crate::env_u32(option_env!("XL_CXRDIV"), 64) as usize;
 
 pub fn stage3(g: &mut G) {
