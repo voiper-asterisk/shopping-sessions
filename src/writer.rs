@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 fn die(what: &str) -> ! {
-    eprintln!("[v2b] write error: {what}");
+    eprintln!("[engine] write error: {what}");
     unsafe { sys::_exit(1) }
 }
 
@@ -295,9 +295,9 @@ fn write_campaign(g: &G, dir: &Path) {
         let cr: i64 = v[2].iter().sum();
         let ca: i64 = v[3].iter().sum();
         let organic: i64 = (0..nd).map(|d| agg[g.nc * nd + d][0] as i64).sum();
-        eprintln!("[v2b] check: sessions user={us} campaign={cs} revenue user={ur} campaign={cr} assisted={ca} credited_non_organic={}", cs - organic);
+        eprintln!("[engine] check: sessions user={us} campaign={cs} revenue user={ur} campaign={cr} assisted={ca} credited_non_organic={}", cs - organic);
         if us != cs || ur != cr || ca < cs - organic {
-            eprintln!("[v2b] CHECK FAILED");
+            eprintln!("[engine] CHECK FAILED");
             unsafe { sys::_exit(5) }
         }
     }
@@ -606,9 +606,9 @@ pub fn stage45(g: &mut G, outdir: &str) {
             }
         }
         let [cs, cr, ca, organic] = s;
-        eprintln!("[v2b] check: sessions user={us} campaign={cs} revenue user={ur} campaign={cr} assisted={ca} credited_non_organic={}", cs - organic);
+        eprintln!("[engine] check: sessions user={us} campaign={cs} revenue user={ur} campaign={cr} assisted={ca} credited_non_organic={}", cs - organic);
         if us != cs || ur != cr || ca < cs - organic {
-            eprintln!("[v2b] CHECK FAILED");
+            eprintln!("[engine] CHECK FAILED");
             unsafe { sys::_exit(5) }
         }
     }

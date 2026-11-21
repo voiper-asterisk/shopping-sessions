@@ -1,11 +1,11 @@
 [package]
-name = "pipeline"
+name = "sessions"
 version = "0.1.0"
 edition = "2021"
 publish = false
 
 [[bin]]
-name = "pipeline"
+name = "sessions"
 path = "src/main.rs"
 
 [features]

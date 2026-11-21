@@ -1,17 +1,35 @@
 #![allow(dead_code, static_mut_refs, unused_unsafe)]
-mod ckix;
-mod complex;
-mod core;
-mod events;
-mod iface;
-mod k_ref;
-mod keyrec;
-mod links;
-mod out;
-mod parse;
-mod pqw;
-mod setup;
-mod sys;
+mod catalog_setup;
+mod click_index;
+mod complex_users;
+mod csv_parser;
+mod fallback;
+mod graph;
+mod key_recovery;
+mod parquet_writer;
+mod records;
+mod ref_parser;
+mod sessionizer;
+mod simd_kernel;
+mod syscalls;
+mod tables;
+mod writer;
+
+pub(crate) use catalog_setup as setup;
+pub(crate) use click_index as ckix;
+pub(crate) use complex_users as complex;
+pub(crate) use csv_parser as parse;
+pub(crate) use fallback as generic;
+pub(crate) use graph as links;
+pub(crate) use key_recovery as keyrec;
+pub(crate) use parquet_writer as pqw;
+pub(crate) use records as iface;
+pub(crate) use ref_parser as k_ref;
+pub(crate) use sessionizer as events;
+pub(crate) use simd_kernel as k_free;
+pub(crate) use syscalls as sys;
+pub(crate) use tables as core;
+pub(crate) use writer as out;
 
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
@@ -21,8 +39,6 @@ use sys::*;
 #[global_allocator]
 static ALLOC: sys::Alloc = sys::Alloc;
 
-mod generic;
-mod k_free;
 pub type K = k_free::Free;
 
 fn dirs(args: &[String], skip: usize) -> (String, String) {
@@ -299,7 +315,7 @@ fn main() {
     sys::exec_init(&args, &data, &outdir, ncpu_env());
     sys::fd_reserve();
     std::panic::set_hook(Box::new(|info| {
-        eprintln!("[v2b] panic: {info}");
+        eprintln!("[engine] panic: {info}");
         sys::fallback("panic")
     }));
     let nt: usize = std::env::var("NCPU").ok().and_then(|s| s.trim().parse().ok()).filter(|&n| n > 0).unwrap_or(8).min(16);
@@ -371,7 +387,7 @@ fn main() {
             keyrec::base36_encode(y, &mut s);
             let (v, len) = enc36(y);
             if v.to_be_bytes()[..len] != s[..] || (len < 8 && v.to_be_bytes()[len] != 0) {
-                eprintln!("[v2b] CHECK FAILED: enc36({y})");
+                eprintln!("[engine] CHECK FAILED: enc36({y})");
                 unsafe { sys::_exit(5) }
             }
         }
@@ -423,7 +439,7 @@ fn main() {
             sess += t.core.n_sess;
         }
         let hwm = std::fs::read_to_string("/proc/self/status").ok().and_then(|s| s.lines().find(|l| l.starts_with("VmHWM")).map(|l| l.split_whitespace().nth(1).unwrap_or("?").to_string())).unwrap_or_default();
-        eprintln!("[v2b] ms: {s}total={:.1} peak_rss_kb={hwm}", t0.elapsed().as_secs_f64() * 1e3);
+        eprintln!("[engine] ms: {s}total={:.1} peak_rss_kb={hwm}", t0.elapsed().as_secs_f64() * 1e3);
         let mut prof = [0u64; 8];
         for tid in 0..nt {
             for k in 0..8 {
@@ -434,9 +450,9 @@ fn main() {
                 }
             }
         }
-        eprintln!("[v2b] prof (thread-ms): scatter={:.1} compact={:.1} runs={:.1} st2b={:.1} st2b_max_bucket={:.1} st2b_pass1={:.1} st2b_pass2={:.1} st2b_sort={:.1}", prof[0] as f64 / 1e6, prof[1] as f64 / 1e6, prof[2] as f64 / 1e6, prof[3] as f64 / 1e6, prof[4] as f64 / 1e6, prof[5] as f64 / 1e6, (prof[6] - prof[5]) as f64 / 1e6, (prof[3] - prof[6]) as f64 / 1e6);
+        eprintln!("[engine] prof (thread-ms): scatter={:.1} compact={:.1} runs={:.1} st2b={:.1} st2b_max_bucket={:.1} st2b_pass1={:.1} st2b_pass2={:.1} st2b_sort={:.1}", prof[0] as f64 / 1e6, prof[1] as f64 / 1e6, prof[2] as f64 / 1e6, prof[3] as f64 / 1e6, prof[4] as f64 / 1e6, prof[5] as f64 / 1e6, (prof[6] - prof[5]) as f64 / 1e6, (prof[3] - prof[6]) as f64 / 1e6);
         eprintln!(
-            "[v2b] rows: events={ev} clicks={ck} links={lk} | kept valid: simple={si} complex={cx} odd={od} | runs={runs} sessions={sess} user_rows={rows} uf_nodes={} cx_users={} joined={} nb={} nub={}",
+            "[engine] rows: events={ev} clicks={ck} links={lk} | kept valid: simple={si} complex={cx} odd={od} | runs={runs} sessions={sess} user_rows={rows} uf_nodes={} cx_users={} joined={} nb={} nub={}",
             g.uf.len(),
             g.cxu.len(),
             g.joined.len(),
@@ -480,7 +496,7 @@ fn main() {
         });
     }
     if timing {
-        eprintln!("[v2b] exit at {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
+        eprintln!("[engine] exit at {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
     }
     #[cfg(feature = "tl")]
     unsafe {

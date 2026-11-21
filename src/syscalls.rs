@@ -103,8 +103,8 @@ struct ExecInfo {
 static mut EXEC: Option<ExecInfo> = None;
 
 pub fn exec_init(args: &[String], data: &str, out: &str, ncpu: usize) {
-    let cs = |s: &str| CString::new(s).unwrap_or_else(|_| CString::new("pipeline").unwrap());
-    let argv0 = cs(args.first().map_or("pipeline", |s| s.as_str()));
+    let cs = |s: &str| CString::new(s).unwrap_or_else(|_| CString::new("sessions").unwrap());
+    let argv0 = cs(args.first().map_or("sessions", |s| s.as_str()));
     let mut a = vec![argv0.clone(), cs("--generic")];
     if args.len() >= 3 {
         a.push(cs(data));
@@ -120,13 +120,13 @@ pub fn exec_init(args: &[String], data: &str, out: &str, ncpu: usize) {
 #[cold]
 #[inline(never)]
 pub fn fallback(why: &str) -> ! {
-    eprintln!("[v2b] FALLBACK: {why}");
+    eprintln!("[engine] FALLBACK: {why}");
     unsafe {
         #[allow(static_mut_refs)]
         if let Some(e) = EXEC.as_ref() {
             execve(c"/proc/self/exe".as_ptr(), e.ptrs.as_ptr(), environ);
             execve(e.argv0.as_ptr(), e.ptrs.as_ptr(), environ);
-            eprintln!("[v2b] exec failed");
+            eprintln!("[engine] exec failed");
             if !WORKERS.load(Ordering::SeqCst) && std::thread::current().name() == Some("main") {
                 crate::run_generic(&e.data, &e.out, e.ncpu);
             }
@@ -461,7 +461,7 @@ pub mod tl {
             let mut rr = r.split('-');
             let a = usize::from_str_radix(rr.next().unwrap_or("0"), 16).unwrap_or(0);
             let b = usize::from_str_radix(rr.next().unwrap_or("0"), 16).unwrap_or(0);
-            if name.starts_with('[') || name.contains("pipeline") || name.contains("s_tl") || (ab != 0 && a <= ab && ab < b) {
+            if name.starts_with('[') || name.contains("sessions") || name.contains("s_tl") || (ab != 0 && a <= ab && ab < b) {
                 continue;
             }
             let kind = if ino != "0" { 0 } else if perm.starts_with("---") { 2 } else { 1 };

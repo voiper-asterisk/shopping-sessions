@@ -5,9 +5,9 @@ COPY Cargo.toml Cargo.lock ./
 COPY .cargo .cargo
 COPY src src
 RUN cargo build --release --target x86_64-unknown-linux-musl \
- && cp target/x86_64-unknown-linux-musl/release/pipeline /pipeline
+ && cp target/x86_64-unknown-linux-musl/release/sessions /sessions
 
 FROM scratch
-COPY --from=build /pipeline /pipeline
+COPY --from=build /sessions /sessions
 USER 1000:1000
-CMD ["/pipeline"]
+CMD ["/sessions"]

@@ -948,7 +948,7 @@ fn name_selftest(g: &G) {
     use crate::keyrec::{unshuffle, A, MASK as M40};
     let mut x = 0x1234_5678_9ABC_DEFu64;
     let bad = |u: u32, class: u32| -> ! {
-        eprintln!("[v2b] CHECK FAILED: fast_name({u}, {class:#x})");
+        eprintln!("[engine] CHECK FAILED: fast_name({u}, {class:#x})");
         unsafe { crate::sys::_exit(5) }
     };
     for i in 0..600_000u64 {
@@ -1000,20 +1000,20 @@ fn name_selftest(g: &G) {
         for j in 0..4 {
             let (v, _) = key_chars(ks[j]);
             if ch[j].to_le_bytes() != v.to_be_bytes() {
-                eprintln!("[v2b] CHECK FAILED: key_chars4({:#x})", ks[j]);
+                eprintln!("[engine] CHECK FAILED: key_chars4({:#x})", ks[j]);
                 unsafe { crate::sys::_exit(5) }
             }
         }
     }
     for xx in 0..1_679_616u64 {
         if ((xx >> 4) * 207_127) >> 24 != xx / 1296 || (xx < 1296 && (xx * 1821) >> 16 != xx / 36) {
-            eprintln!("[v2b] CHECK FAILED: digit division at {xx}");
+            eprintln!("[engine] CHECK FAILED: digit division at {xx}");
             unsafe { crate::sys::_exit(5) }
         }
     }
     for y in 0..(1u64 << 22) {
         if (y * DIV_M) >> 39 != y / 84_375 {
-            eprintln!("[v2b] CHECK FAILED: day division at {y}");
+            eprintln!("[engine] CHECK FAILED: day division at {y}");
             unsafe { crate::sys::_exit(5) }
         }
     }

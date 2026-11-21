@@ -319,7 +319,7 @@ pub fn setup(data: &str, nt: usize, check: bool) -> G {
         }
     };
     if check {
-        eprintln!("[v2b] keys: XL_UKEY={ukey:x} XL_EKEY={ekey:x}");
+        eprintln!("[engine] keys: XL_UKEY={ukey:x} XL_EKEY={ekey:x}");
     }
     let mut ccap = click_cap(ck_bytes);
     let mut ckey = 0;
@@ -334,7 +334,7 @@ pub fn setup(data: &str, nt: usize, check: bool) -> G {
         }
     }
     if check {
-        eprintln!("[v2b] click key: XL_CKEY={ckey:x} ccap={ccap}");
+        eprintln!("[engine] click key: XL_CKEY={ckey:x} ccap={ccap}");
     }
 
     lap("maps+keys");
@@ -954,8 +954,8 @@ pub fn setup_par(data: &str, nt: usize, check: bool) -> G {
     let [ev_bytes, ck_bytes, lk_bytes] = bytes;
     let (ukey, ekey, ckey, ccap) = keys.take();
     if check {
-        eprintln!("[v2b] keys: XL_UKEY={ukey:x} XL_EKEY={ekey:x}");
-        eprintln!("[v2b] click key: XL_CKEY={ckey:x} ccap={ccap}");
+        eprintln!("[engine] keys: XL_UKEY={ukey:x} XL_EKEY={ekey:x}");
+        eprintln!("[engine] click key: XL_CKEY={ckey:x} ccap={ccap}");
     }
     let (camp, channels, nc) = camps.take();
     let (prod, cats) = lookups.take();
