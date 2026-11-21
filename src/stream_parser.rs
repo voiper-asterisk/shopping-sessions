@@ -12,7 +12,7 @@ pub static mut RELEASE: bool = true;
 pub static mut PREFETCH: bool = false;
 static POPW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 fn popw() -> bool {
-    *POPW.get_or_init(|| !std::env::var("XL_POPW").is_ok_and(|v| v == "0") && !(crate::sys::r3_on() && crate::sys::HUGE.load(Ordering::Relaxed) && !crate::sys::SMALLPAGES.load(Ordering::Relaxed)))
+    *POPW.get_or_init(|| std::env::var("XL_POPW").is_ok_and(|v| v == "1"))
 }
 const MADV_POPULATE_WRITE: i32 = 23;
 #[cfg(feature = "knobs")]

@@ -321,6 +321,8 @@ fn main() {
         run_generic(&data, &outdir, ncpu_env());
     }
     let (data, outdir) = dirs(&args, 0);
+    let _ = std::fs::create_dir(std::path::Path::new(&outdir).join("user_daily"));
+    let _ = std::fs::create_dir(std::path::Path::new(&outdir).join("campaign_daily"));
     sys::exec_init(&args, &data, &outdir, ncpu_env());
     sys::fault_fallback_init();
     sys::fd_reserve();
