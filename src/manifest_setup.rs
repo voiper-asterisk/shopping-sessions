@@ -73,14 +73,13 @@ fn list(dir: &Path) -> Vec<(std::path::PathBuf, usize)> {
     let mut v = Vec::new();
     let Ok(rd) = std::fs::read_dir(dir) else { fallback("cannot list an input folder") };
     for e in rd.flatten() {
-        let p = e.path();
         let name = e.file_name();
         if !name.as_encoded_bytes().ends_with(b".csv") {
             continue;
         }
         let Ok(md) = e.metadata() else { continue };
         if md.is_file() {
-            v.push((p, md.len() as usize));
+            v.push((e.path(), md.len() as usize));
         }
     }
     v

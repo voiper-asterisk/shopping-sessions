@@ -1378,7 +1378,7 @@ unsafe fn ev_d<S: EventSink>(cx: &Cx<EvBatch, S>, p: *const u8, st: EvSt, np: *c
         let r = _mm256_mask_sub_epi64(_mm256_add_epi64(t, f), ksub, t, f);
         let r = _mm256_add_epi64(r, st.days);
         store_hi::<0>(s, _mm256_castsi256_si128(r));
-        _mm_storeu_si128(s.byte_add(core::mem::offset_of!(EvBatch, ing)) as *mut __m128i, _mm256_extracti128_si256::<1>(r));
+        _mm_storel_epi64(s.byte_add(core::mem::offset_of!(EvBatch, ing)) as *mut __m128i, _mm256_extracti128_si256::<1>(r));
         let all = _mm256_ternarylogic_epi64::<0xFE>(bad_ta, bad_tb, st.bad2);
         if _mm256_testz_si256(all, all) == 0 {
             let bad_tt = _mm256_or_si256(bad_ta, bad_tb);

@@ -78,7 +78,7 @@ pub const fn env_u32(s: Option<&str>, d: u32) -> u32 {
     }
 }
 pub const BB: u32 = env_u32(option_env!("XL_BB"), 15);
-pub const SPIN_US_DEFAULT: u64 = env_u32(option_env!("XL_SPIN_DEF"), 400) as u64;
+pub const SPIN_US_DEFAULT: u64 = env_u32(option_env!("XL_SPIN_DEF"), 100) as u64;
 pub const BSIZE: usize = 1 << BB;
 pub const UB: u32 = env_u32(option_env!("XL_UB"), 12);
 pub const UBSIZE: usize = 1 << UB;

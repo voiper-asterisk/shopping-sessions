@@ -2475,37 +2475,7 @@ const CH_DEFAULT: usize = env_u32(option_env!("XL_CH_DEF"), 65536) as usize;
 pub static RD_AUTO: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 const RD_AUTO_BYTES: usize = 128 << 10;
 
-pub(crate) fn fault_around_check(region: *const u8, files: &[FileInfo]) {
-    if !crate::sys::FD_ALL.load(Ordering::Relaxed) || drv().rd > 0 {
-        return;
-    }
-    match std::env::var("XL_FA").ok().as_deref() {
-        Some("1") => return,
-        Some("0") => {
-            RD_AUTO.store(RD_AUTO_BYTES, Ordering::Relaxed);
-            return;
-        }
-        _ => {}
-    }
-    let Some(f) = files.iter().max_by_key(|f| f.len) else { return };
-    if f.len < (4 << 20) {
-        return;
-    }
-    let mut own = 0;
-    for off in [f.len / 2, f.len / 4 * 3] {
-        let off = off & !0xFFFF;
-        unsafe {
-            let p = region.add(f.off + off);
-            std::ptr::read_volatile(p);
-            let a = crate::sys::minflt(1);
-            std::ptr::read_volatile(p.add(4096));
-            own += (crate::sys::minflt(1) > a) as usize;
-        }
-    }
-    if own == 2 {
-        RD_AUTO.store(RD_AUTO_BYTES, Ordering::Relaxed);
-    }
-}
+pub(crate) fn fault_around_check(_region: *const u8, _files: &[FileInfo]) {}
 
 pub static mut FDS: Vec<i32> = Vec::new();
 #[allow(static_mut_refs)]
@@ -2562,37 +2532,7 @@ pub(crate) fn cpu_order() -> &'static Vec<usize> {
         if r <= 0 {
             return Vec::new();
         }
-        let allowed: Vec<usize> = (0..1024).filter(|&c| m[c / 64] >> (c % 64) & 1 != 0).collect();
-        let mut seen = vec![false; 1024];
-        let mut out = Vec::new();
-        for &c in &allowed {
-            if seen[c] {
-                continue;
-            }
-            let sib = std::fs::read_to_string(format!("/sys/devices/system/cpu/cpu{c}/topology/thread_siblings_list")).unwrap_or_default();
-            let mut grp: Vec<usize> = Vec::new();
-            let mut has_c = false;
-            for part in sib.trim().split(',') {
-                let mut it = part.split('-').filter_map(|x| x.parse::<usize>().ok());
-                if let Some(a) = it.next() {
-                    let b = it.next().unwrap_or(a);
-                    for x in a..=b.min(1023) {
-                        has_c |= x == c;
-                        grp.push(x);
-                    }
-                }
-            }
-            if !has_c {
-                grp = vec![c];
-            }
-            for x in grp {
-                if x < 1024 && !seen[x] && m[x / 64] >> (x % 64) & 1 != 0 {
-                    seen[x] = true;
-                    out.push(x);
-                }
-            }
-        }
-        out
+        (0..1024).filter(|&c| m[c / 64] >> (c % 64) & 1 != 0).collect()
     })
 }
 

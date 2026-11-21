@@ -51,8 +51,7 @@ pub fn minflt(who: i32) -> i64 {
 }
 
 pub fn detect_pages() {
-    let never = std::fs::read("/sys/kernel/mm/transparent_hugepage/enabled").map_or(false, |s| s.windows(7).any(|w| w == b"[never]"));
-    SMALLPAGES.store(!HUGE.load(Ordering::Relaxed) || never, Ordering::Relaxed);
+    SMALLPAGES.store(!HUGE.load(Ordering::Relaxed), Ordering::Relaxed);
 }
 
 pub unsafe fn release(p: *const u8, bytes: usize) {
@@ -366,7 +365,9 @@ pub fn pool_start(nt: usize) {
     }
     WORKERS.store(true, Ordering::SeqCst);
     POOL_N.store(nt - 1, Ordering::SeqCst);
-    spawn_small(move || worker(1, nt));
+    for t in 1..nt {
+        spawn_small(move || worker(t, nt));
+    }
 }
 
 pub const STACK: usize = (2 << 20) - (64 << 10);
@@ -376,12 +377,7 @@ fn spawn_small<F: FnOnce() + Send + 'static>(f: F) {
     }
 }
 
-fn worker(tid: usize, nt: usize) -> ! {
-    for c in [2 * tid, 2 * tid + 1] {
-        if c < nt {
-            spawn_small(move || worker(c, nt));
-        }
-    }
+fn worker(tid: usize, _nt: usize) -> ! {
     #[cfg(feature = "tl")]
     tl::mark(tid, 10);
     if PIN_AT_START.load(Ordering::Relaxed) && tid < 16 {
