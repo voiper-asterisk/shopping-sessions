@@ -202,7 +202,7 @@ pub fn anon_small(len: usize) -> *mut u8 {
     p
 }
 
-const R3_DEF: bool = crate::env_u32(option_env!("XL_R3_DEF"), 1) != 0;
+const R3_DEF: bool = crate::env_u32(option_env!("XL_R3_DEF"), 0) != 0;
 static R3: AtomicBool = AtomicBool::new(R3_DEF);
 pub fn r3_on() -> bool {
     R3.load(Ordering::Relaxed)

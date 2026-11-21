@@ -2874,7 +2874,7 @@ pub mod pmu {
 }
 
 
-const FR_K_DEF: usize = env_u32(option_env!("XL_RELK_DEF"), 8) as usize;
+const FR_K_DEF: usize = env_u32(option_env!("XL_RELK_DEF"), 1) as usize;
 static FR_K: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 #[inline]
 fn fr_k() -> usize {
