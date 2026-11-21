@@ -391,7 +391,12 @@ fn clear_stale(dir: &Path) {
 pub fn stage5(g: &mut G, outdir: &str) {
     let ud = Path::new(outdir).join("user_daily");
     let cd = Path::new(outdir).join("campaign_daily");
-    if std::fs::create_dir_all(&ud).is_err() || std::fs::create_dir_all(&cd).is_err() {
+    let _ = std::fs::create_dir(&ud);
+    let _ = std::fs::create_dir(&cd);
+    if !ud.is_dir() && std::fs::create_dir_all(&ud).is_err() {
+        die("cannot create the output folders");
+    }
+    if !cd.is_dir() && std::fs::create_dir_all(&cd).is_err() {
         die("cannot create the output folders");
     }
     clear_stale(&ud);
@@ -493,7 +498,12 @@ pub fn stage45(g: &mut G, outdir: &str) {
     crate::complex::stage4_pre(g);
     let ud = Path::new(outdir).join("user_daily");
     let cd = Path::new(outdir).join("campaign_daily");
-    if std::fs::create_dir_all(&ud).is_err() || std::fs::create_dir_all(&cd).is_err() {
+    let _ = std::fs::create_dir(&ud);
+    let _ = std::fs::create_dir(&cd);
+    if !ud.is_dir() && std::fs::create_dir_all(&ud).is_err() {
+        die("cannot create the output folders");
+    }
+    if !cd.is_dir() && std::fs::create_dir_all(&cd).is_err() {
         die("cannot create the output folders");
     }
     clear_stale(&ud);
