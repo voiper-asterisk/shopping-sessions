@@ -1,35 +1,35 @@
 #![allow(dead_code, static_mut_refs, unused_unsafe)]
-mod catalog_setup;
-mod click_index;
-mod complex_users;
-mod csv_parser;
-mod fallback;
-mod graph;
-mod key_recovery;
-mod parquet_writer;
-mod records;
-mod ref_parser;
-mod sessionizer;
-mod simd_kernel;
-mod syscalls;
-mod tables;
-mod writer;
+mod manifest_setup;
+mod click_indexer;
+mod complex_state;
+mod stream_parser;
+mod compat;
+mod user_graph;
+mod key_inversion;
+mod parquet_codec;
+mod batch_types;
+mod scalar_parser;
+mod session_engine;
+mod vector_kernel;
+mod os_runtime;
+mod data_tables;
+mod parquet_sink;
 
-pub(crate) use catalog_setup as setup;
-pub(crate) use click_index as ckix;
-pub(crate) use complex_users as complex;
-pub(crate) use csv_parser as parse;
-pub(crate) use fallback as generic;
-pub(crate) use graph as links;
-pub(crate) use key_recovery as keyrec;
-pub(crate) use parquet_writer as pqw;
-pub(crate) use records as iface;
-pub(crate) use ref_parser as k_ref;
-pub(crate) use sessionizer as events;
-pub(crate) use simd_kernel as k_free;
-pub(crate) use syscalls as sys;
-pub(crate) use tables as core;
-pub(crate) use writer as out;
+pub(crate) use manifest_setup as setup;
+pub(crate) use click_indexer as ckix;
+pub(crate) use complex_state as complex;
+pub(crate) use stream_parser as parse;
+pub(crate) use compat as generic;
+pub(crate) use user_graph as links;
+pub(crate) use key_inversion as keyrec;
+pub(crate) use parquet_codec as pqw;
+pub(crate) use batch_types as iface;
+pub(crate) use scalar_parser as k_ref;
+pub(crate) use session_engine as events;
+pub(crate) use vector_kernel as k_free;
+pub(crate) use os_runtime as sys;
+pub(crate) use data_tables as core;
+pub(crate) use parquet_sink as out;
 
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
@@ -148,7 +148,7 @@ pub struct EdgeInfo {
 }
 
 pub struct TState {
-    pub ev: parse::Part,
+    pub ev: parse::EvPart,
     pub us: parse::Part,
     pub raws: Vec<(u64, u32)>,
     pub rawbuf: Vec<u8>,
@@ -164,7 +164,7 @@ pub struct TState {
     pub cx_raw: Vec<Rec>,
     pub cx_ev: Vec<Vec<Rec>>,
     pub cx_ck: Vec<Vec<[u64; 3]>>,
-    pub ck: Vec<[u64; 2]>,
+    pub ck: Vec<u64>,
     pub runbuf: Vec<Rec>,
     pub pend: Vec<(u32, u16)>,
     pub cnt: Vec<u32>,
@@ -266,12 +266,12 @@ impl G {
         }
     }
     #[inline(always)]
-    pub fn csr_range(&self, u: u32) -> &[[u64; 2]] {
+    pub fn csr_range(&self, u: u32) -> &[u64] {
         unsafe {
             let i = u as usize + (u as usize >> UB);
             let a = *self.csr_off.add(i) as usize;
             let b = *self.csr_off.add(i + 1) as usize;
-            std::slice::from_raw_parts(self.csr.add(a), b - a)
+            std::slice::from_raw_parts((self.csr as *const u64).add(a), b - a)
         }
     }
 }
@@ -313,6 +313,7 @@ fn main() {
     }
     let (data, outdir) = dirs(&args, 0);
     sys::exec_init(&args, &data, &outdir, ncpu_env());
+    sys::fault_fallback_init();
     sys::fd_reserve();
     std::panic::set_hook(Box::new(|info| {
         eprintln!("[engine] panic: {info}");
@@ -321,7 +322,6 @@ fn main() {
     let nt: usize = std::env::var("NCPU").ok().and_then(|s| s.trim().parse().ok()).filter(|&n| n > 0).unwrap_or(8).min(16);
     let timing = std::env::var("XL_TIMING").is_ok_and(|v| v == "1");
     let check = std::env::var("XL_CHECK").is_ok_and(|v| v == "1");
-    unsafe { sys::TIMING_ENABLED = timing || check; };
     if std::env::var("XL_NOHUGE").is_ok_and(|v| v == "1") {
         HUGE.store(false, std::sync::atomic::Ordering::Relaxed);
     }
@@ -333,8 +333,13 @@ fn main() {
         sys::tl::T0_NS = sys::tl::realtime_ns() - t0.elapsed().as_nanos() as u64;
         sys::tl::LAPT.reserve(64);
     }
+    #[cfg(feature = "tl")]
+    sys::mp::ON.store(std::env::var("XL_MEMPROF").is_ok(), std::sync::atomic::Ordering::Relaxed);
     if std::env::var("XL_ALLOC").map_or(true, |v| v == "1") {
         sys::alloc_enable();
+    }
+    if let Some(v) = std::env::var("XL_DONATE").ok().and_then(|v| v.trim().parse::<usize>().ok()) {
+        sys::DONATE_DIV.store(v, std::sync::atomic::Ordering::Relaxed);
     }
     if std::env::var("XL_FIRST4K").is_ok_and(|v| v == "1") {
         sys::FIRST_SMALL.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -350,7 +355,7 @@ fn main() {
     } else {
         sys::SPIN_TICKS.store(SPIN_US_DEFAULT * 2000, std::sync::atomic::Ordering::Relaxed);
     }
-    sys::PIN_AT_START.store(parse::pin_mode() == 2 && std::env::var("XL_PINSTART").map_or(true, |v| v != "0"), std::sync::atomic::Ordering::Relaxed);
+    sys::PIN_AT_START.store(parse::pin_mode() == 2 && std::env::var("XL_PINSTART").is_ok_and(|v| v == "1"), std::sync::atomic::Ordering::Relaxed);
     if std::env::var("XL_NOTOUCH").is_ok_and(|v| v == "0") {
         sys::CORE_NOTOUCH.store(false, std::sync::atomic::Ordering::Relaxed);
     }
@@ -369,9 +374,9 @@ fn main() {
     let knob = |name: &str, default: bool| std::env::var(name).map_or(default, |v| v == "1");
     unsafe {
         parse::NT = knob("XL_NT", true);
-        parse::RELEASE = knob("XL_REL", false);
+        parse::RELEASE = knob("XL_REL", true);
         parse::PREFETCH = knob("XL_PF", false);
-        sys::RELEASE.store(knob("XL_FREE", false), std::sync::atomic::Ordering::Relaxed);
+        sys::RELEASE.store(knob("XL_FREE", true), std::sync::atomic::Ordering::Relaxed);
         #[cfg(feature = "knobs")]
         {
             parse::NOSINK = knob("XL_NOSINK", false);
@@ -464,7 +469,8 @@ fn main() {
     #[cfg(feature = "tl")]
     let rel0 = sys::tl::now();
     let endrel = std::env::var("XL_ENDREL").ok();
-    if endrel.as_deref() == Some("1") || endrel.as_deref() == Some("2") {
+    let many_faults = endrel.is_none() && sys::minflt(0) as usize > 2 * (g.files.last().map_or(0, |f| f.off + f.len) >> 16) + 60_000;
+    if ((sys::SMALLPAGES.load(std::sync::atomic::Ordering::Relaxed) || many_faults) && endrel.as_deref().map_or(true, |v| v == "1")) || endrel.as_deref() == Some("2") {
         let nt = g.nt;
         let mut r = [[(0usize, 0usize); 12]; 16];
         for tid in 0..nt {
@@ -481,7 +487,7 @@ fn main() {
                 v(c.rev.as_ptr() as *const u8, c.rev.len() * 4),
                 v(c.cat.as_ptr(), c.cat.len()),
                 v(t.edge.as_ptr() as *const u8, t.edge.len() * 16),
-                if g.csr.is_null() { (0, 0) } else { v((g.csr as *const u8).wrapping_add(g.ncsr * 16 * tid / nt), g.ncsr * 16 * (tid + 1) / nt - g.ncsr * 16 * tid / nt) },
+                if g.csr.is_null() { (0, 0) } else { v((g.csr as *const u8).wrapping_add(g.ncsr * 8 * tid / nt), g.ncsr * 8 * (tid + 1) / nt - g.ncsr * 8 * tid / nt) },
                 if endrel.as_deref() == Some("2") { let tot = g.files.last().map_or(0, |f| f.off + f.len); v(g.region.wrapping_add(tot * tid / nt), tot * (tid + 1) / nt - tot * tid / nt) } else { (0, 0) },
                 (0, 0),
             ];

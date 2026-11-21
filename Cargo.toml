@@ -1,11 +1,11 @@
 [package]
-name = "sessions"
-version = "0.1.0"
+name = "shopping-sessions"
+version = "0.2.0"
 edition = "2021"
 publish = false
 
 [[bin]]
-name = "sessions"
+name = "shopping-sessions"
 path = "src/main.rs"
 
 [features]
@@ -24,4 +24,4 @@ codegen-units = 1
 panic = "abort"
 debug = false
 overflow-checks = false
-strip = "symbols"
+strip = true

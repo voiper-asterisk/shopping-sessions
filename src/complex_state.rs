@@ -27,6 +27,8 @@ fn resolve_all(g: &G, t: &mut TState) {
     }
 }
 
+const RANKF: u64 = 1 << 61;
+
 pub fn clicks_a(g: &G, tid: usize) {
     let t = g.t(tid);
     resolve_all(g, t);
@@ -37,12 +39,24 @@ pub fn clicks_a(g: &G, tid: usize) {
         }
         for &u in &g.cxu[i0..(i0 + 64).min(g.cxu.len())] {
             let mut cache = [u64::MAX; 16];
-            for c in g.csr_range(u) {
-                let a = (c[0] & 15) as usize;
-                if cache[a] == u64::MAX {
-                    cache[a] = resolve_normal(g, u, a as u32);
+            let cks = g.csr_range(u);
+            if unsafe { *g.utab.add(u as usize) } & COMPLEX != 0 {
+                for c in cks.chunks_exact(2) {
+                    let a = (c[0] & 15) as usize;
+                    if cache[a] == u64::MAX {
+                        cache[a] = resolve_normal(g, u, a as u32);
+                    }
+                    t.cx_ck[shard(cache[a])].push([cache[a], c[0], c[1]]);
                 }
-                t.cx_ck[shard(cache[a])].push([cache[a], c[0], c[1]]);
+            } else {
+                let base = (cks.as_ptr() as usize - g.csr as usize) / 8;
+                for (k, &c) in cks.iter().enumerate() {
+                    let a = (c & 15) as usize;
+                    if cache[a] == u64::MAX {
+                        cache[a] = resolve_normal(g, u, a as u32);
+                    }
+                    t.cx_ck[shard(cache[a])].push([cache[a], c, RANKF | (base + k) as u64]);
+                }
             }
         }
     }
@@ -93,15 +107,20 @@ pub fn person_shard(g: &G, tid: usize, s: usize, sc: &mut PScratch) {
             return;
         }
         evs.sort_unstable_by_key(|r| (r.w1 as u128) << 64 | r.w0 as u128);
-        if cks.iter().all(|c| c[2] & RAW == 0) {
+        if cks.iter().all(|c| c[2] & (RAW | RANKF) != RAW) {
             dec.clear();
-            dec.extend(cks.iter().map(|c| ((c[0] as u128) << 64 | (c[1] >> 32) as u128, !enc36(c[2]).0, *c)));
+            dec.extend(cks.iter().map(|c| ((c[0] as u128) << 64 | (c[1] >> 32) as u128, if c[2] & RANKF != 0 { c[2] } else { !enc36(c[2]).0 }, *c)));
             dec.sort_unstable_by(|x, y| (x.0, x.1).cmp(&(y.0, y.1)));
             for (d, x) in cks.iter_mut().zip(dec.iter()) {
                 *d = x.2;
             }
         } else {
-            cks.sort_unstable_by(|a, b| (a[0], a[1] >> 32).cmp(&(b[0], b[1] >> 32)).then_with(|| cid_cmp(g, b[2], a[2])));
+            cks.sort_unstable_by(|a, b| (a[0], a[1] >> 32).cmp(&(b[0], b[1] >> 32)).then_with(|| if (a[2] | b[2]) & RANKF != 0 { a[2].cmp(&b[2]) } else { cid_cmp(g, b[2], a[2]) }));
+        }
+        for w in cks.windows(2) {
+            if w[0][0] == w[1][0] && (w[0][2] ^ w[1][2]) & RANKF != 0 {
+                fallback("click order keys of one person");
+            }
         }
         let (mut i, mut j) = (0usize, 0usize);
         while i < evs.len() {
@@ -115,7 +134,7 @@ pub fn person_shard(g: &G, tid: usize, s: usize, sc: &mut PScratch) {
             }
             t.ck.clear();
             while j < cks.len() && cks[j][0] == pk {
-                t.ck.push([cks[j][1], cks[j][2]]);
+                t.ck.push(cks[j][1]);
                 j += 1;
             }
             name_of(g, pk, name);
@@ -165,6 +184,9 @@ pub fn stage4_pre(g: &mut G) {
     for tid in 0..g.nt {
         cxu.extend_from_slice(&g.t(tid).cx_users);
         cxu.extend_from_slice(&g.t(tid).mixed_users);
+    }
+    if crate::links::DBG.load(Ordering::Relaxed) {
+        eprintln!("[dbg] stage 4 users: {} ({} with a run in two classes)", cxu.len(), (0..g.nt).map(|t| g.t(t).mixed_users.len()).sum::<usize>());
     }
     g.cxu = cxu;
     crate::sys::lap("c.pre");

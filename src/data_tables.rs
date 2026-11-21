@@ -34,6 +34,7 @@ pub struct Tab<T> {
 }
 unsafe impl<T> Send for Tab<T> {}
 impl<T: Copy> Tab<T> {
+    #[cfg_attr(feature = "tl", track_caller)]
     pub fn new(n: usize) -> Tab<T> {
         Tab { p: anon(n.max(1) * std::mem::size_of::<T>()) as *mut T, n }
     }
@@ -71,6 +72,7 @@ pub struct Col<T> {
     cap: usize,
     home: *mut T,
     home_cap: usize,
+    zlen: usize,
 }
 unsafe impl<T> Send for Col<T> {}
 pub static COLS_PINNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -78,10 +80,11 @@ extern "C" {
     fn syscall(n: i64, ...) -> i64;
 }
 impl<T: Copy> Col<T> {
+    #[cfg_attr(feature = "tl", track_caller)]
     pub fn new(cap: usize) -> Col<T> {
         let cap = cap.max(16);
         let p = anon(cap * std::mem::size_of::<T>()) as *mut T;
-        Col { p, len: 0, cap, home: p, home_cap: cap }
+        Col { p, len: 0, cap, home: p, home_cap: cap, zlen: 0 }
     }
     #[inline(always)]
     pub fn push(&mut self, v: T) {
@@ -125,6 +128,13 @@ impl<T: Copy> Col<T> {
     pub fn truncate(&mut self, n: usize) {
         self.len = n;
     }
+    pub fn zeros_fresh(&mut self, n: usize) {
+        if self.len != 0 || self.p != self.home || n > self.cap {
+            fallback("zeros_fresh");
+        }
+        self.len = n;
+        self.zlen = n;
+    }
     #[inline(always)]
     pub fn reserve_total(&mut self, n: usize) {
         if n > self.cap {
@@ -143,7 +153,10 @@ impl<T: Copy> Col<T> {
         if self.p != self.home || self.len > cap || cap == 0 || p as usize & 4095 != 0 {
             return;
         }
-        std::ptr::copy_nonoverlapping(self.p, p, self.len);
+        let z = self.zlen.min(self.len);
+        std::ptr::write_bytes(p, 0, z);
+        std::ptr::copy_nonoverlapping(self.p.add(z), p.add(z), self.len - z);
+        self.zlen = 0;
         self.p = p;
         self.cap = cap;
     }
@@ -215,7 +228,7 @@ impl Core {
     pub fn new(nc: usize, nd: usize, row_cap: usize, ws_mod: u64, day0: i32) -> Core {
         let mut names_off = Col::new(row_cap + 1);
         if crate::sys::CORE_NOTOUCH.load(std::sync::atomic::Ordering::Relaxed) {
-            names_off.truncate(1);
+            names_off.zeros_fresh(1);
         } else {
             names_off.push(0u32);
         }
@@ -274,7 +287,7 @@ impl Core {
     }
 
     #[inline]
-    pub fn person(&mut self, g: &G, evs: &[Rec], cks: &[[u64; 2]], name: Name) {
+    pub fn person(&mut self, g: &G, evs: &[Rec], cks: &[u64], name: Name) {
         if evs.is_empty() {
             return;
         }
@@ -467,7 +480,7 @@ impl Core {
     }
 
     #[inline(always)]
-    pub fn finish(&mut self, g: &G, st: &St, cks: &[[u64; 2]], name: Name) {
+    pub fn finish(&mut self, g: &G, st: &St, cks: &[u64], name: Name) {
         self.sess.push(Sess { start: st.s_start + WEEK_MS, day: st.s_day, rev: st.s_rev });
         self.flush_row(st.pidx, st.s_day, st.d_s, st.d_e, st.d_rev, st.catmask);
         self.n_sess += self.sess.len() as u64;
@@ -504,13 +517,13 @@ impl Core {
         let small = self.sess.len() * n <= 4096;
         let (mut lo, mut hi) = (0usize, 0usize);
         for s in &self.sess {
-            while hi < n && (cks[hi][0] >> 32) <= s.start {
+            while hi < n && (cks[hi] >> 32) <= s.start {
                 hi += 1;
             }
-            while lo < hi && (cks[lo][0] >> 32) + WEEK_MS < s.start {
+            while lo < hi && (cks[lo] >> 32) + WEEK_MS < s.start {
                 lo += 1;
             }
-            let camp = if hi > lo { ((cks[hi - 1][0] >> 4) & (CBOUND as u64 - 1)) as usize } else { self.organic };
+            let camp = if hi > lo { ((cks[hi - 1] >> 4) & (CBOUND as u64 - 1)) as usize } else { self.organic };
             let i = camp * nd + s.day as usize;
             self.agg[i][0] += 1;
             if s.rev != 0 {
@@ -521,7 +534,7 @@ impl Core {
                 self.serial += 1;
                 let serial = self.serial;
                 for k in &cks[lo..hi] {
-                    let c = ((k[0] >> 4) & (CBOUND as u64 - 1)) as usize;
+                    let c = ((k >> 4) & (CBOUND as u64 - 1)) as usize;
                     if self.stamp[c] != serial {
                         self.stamp[c] = serial;
                         self.agg[c * nd + s.day as usize][1] += 1;
@@ -535,7 +548,7 @@ impl Core {
     }
 
     #[inline(never)]
-    fn assists_big(&mut self, cks: &[[u64; 2]]) {
+    fn assists_big(&mut self, cks: &[u64]) {
         let nd = self.nd;
         let ns = self.sess.len();
         let mut i = 0usize;
@@ -551,9 +564,9 @@ impl Core {
             self.iv.resize(self.organic + 2, [NONE, 0]);
         }
         self.cts.clear();
-        for k in cks {
-            let c = ((k[0] >> 4) & (CBOUND as u64 - 1)) as usize;
-            let t = k[0] >> 32;
+        for &k in cks {
+            let c = ((k >> 4) & (CBOUND as u64 - 1)) as usize;
+            let t = k >> 32;
             if c >= self.iv.len() {
                 fallback("campaign number");
             }

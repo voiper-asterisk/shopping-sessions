@@ -277,6 +277,7 @@ pub fn setup(data: &str, nt: usize, check: bool) -> G {
         unsafe { crate::parse::keep_fd(f) };
         off += (len + pg + hpg - 1) & !(hpg - 1);
     }
+    io_advise(region, off);
     crate::parse::fault_around_check(region, &files);
     lap("s.mmap");
     let total_bytes = ev_bytes + ck_bytes + lk_bytes;
@@ -353,7 +354,7 @@ pub fn setup(data: &str, nt: usize, check: bool) -> G {
     crate::sys::ANON_TINY.store(true, std::sync::atomic::Ordering::Relaxed);
     for _ in 0..nt {
         t.push(UnsafeCell::new(TState {
-            ev: parse::Part::empty(),
+            ev: parse::EvPart::empty(),
             us: parse::Part::empty(),
             raws: Vec::new(),
             rawbuf: Vec::new(),
@@ -757,7 +758,7 @@ pub fn setup_par(data: &str, nt: usize, check: bool) -> G {
     let q_core = q_part + npt;
     let nq = q_core + nt;
     let nbs: Slot<(usize, usize)> = Slot::new();
-    let parts: Vec<Slot<(crate::parse::Part, crate::parse::Part)>> = (0..if upart { nt } else { 0 }).map(|_| Slot::new()).collect();
+    let parts: Vec<Slot<(crate::parse::EvPart, crate::parse::Part)>> = (0..if upart { nt } else { 0 }).map(|_| Slot::new()).collect();
     let qnext = AtomicUsize::new(0);
     let task_inner = |i: usize| {
         if i == 1 {
@@ -783,7 +784,7 @@ pub fn setup_par(data: &str, nt: usize, check: bool) -> G {
         } else if i == q_part {
             let &(nb, nub) = nbs.get();
             for p in &parts {
-                p.set((crate::parse::Part::new_unbound(nb), crate::parse::Part::new_unbound(nub)));
+                p.set((crate::parse::EvPart::new_unbound(nb), crate::parse::Part::new_unbound(nub)));
             }
         } else if i == q_merge {
             let parts: Vec<_> = pparts.iter().map(|p| p.take()).collect();
@@ -884,6 +885,7 @@ pub fn setup_par(data: &str, nt: usize, check: bool) -> G {
                 }
             }
         }
+        io_advise(region, off);
         crate::parse::fault_around_check(region, &files);
         lap("s.mmap");
         if !sbytes.done.load(Ordering::Relaxed) {
@@ -1041,7 +1043,7 @@ fn part_counts(ev_bytes: usize) -> (usize, usize) {
 
 fn tstate(core: core::Core) -> TState {
     TState {
-        ev: parse::Part::empty(),
+        ev: parse::EvPart::empty(),
         us: parse::Part::empty(),
         raws: Vec::new(),
         rawbuf: Vec::new(),
@@ -1070,5 +1072,13 @@ fn tstate(core: core::Core) -> TState {
         n_odd: 0,
         n_runs: 0,
         prof: [0; 8],
+    }
+}
+
+fn io_advise(region: *mut u8, len: usize) {
+    const DEF: i32 = crate::env_u32(option_env!("XL_IOADV_DEF"), 2) as i32;
+    let adv = std::env::var("XL_IOADV").ok().and_then(|s| s.trim().parse::<i32>().ok()).unwrap_or(DEF);
+    if adv == 2 || adv == 1 {
+        unsafe { madvise(region, len, adv) };
     }
 }
