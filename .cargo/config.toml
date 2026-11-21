@@ -1,0 +1,9 @@
+[build]
+rustflags = [
+    "-C", "target-cpu=cascadelake",
+    "-C", "target-feature=+avx512f,+avx512dq,+avx512cd,+avx512bw,+avx512vl",
+    "-C", "relocation-model=static",
+    "-C", "llvm-args=-inline-threshold=1000",
+    "-C", "llvm-args=-x86-branches-within-32B-boundaries",
+    "-C", "llvm-args=-x86-pad-max-prefix-size=5"
+]
