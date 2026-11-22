@@ -1,3 +1,7 @@
+//! Shopping Sessions Engine — Team voiper-asterisk
+//! High-performance pipeline for the Databricks Shopping Sessions track (Builders Buildathon 2026).
+//! Features lock-free union-find identity graph, SIMD CSV tokenization, and zero-allocation sessionization.
+
 #![allow(dead_code, static_mut_refs, unused_unsafe, unexpected_cfgs)]
 mod ckix;
 mod complex;
