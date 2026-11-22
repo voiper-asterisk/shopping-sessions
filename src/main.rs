@@ -923,15 +923,18 @@ fn parse_events(ctx: &Ctx, b: &[u8], start: usize, end: usize, adj: isize, ix: &
             if l1 == 0 || l5 == 0 {
                 break 'v;
             }
-            let (p2, l2) = fld!(base, rs, q, 2);
-            let Some(t) = ts_p(p2, l2, dc) else { break 'v };
-            let rel = t - cbase;
-            if rel < ws_rel || rel >= we_rel {
+            if ingest == u32::MAX {
                 break 'v;
             }
             let (p4, l4) = fld!(base, rs, q, 4);
             let kind = kind_p(p4, l4);
             if kind == 0 {
+                break 'v;
+            }
+            let (p2, l2) = fld!(base, rs, q, 2);
+            let Some(t) = ts_p(p2, l2, dc) else { break 'v };
+            let rel = t - cbase;
+            if rel < ws_rel || rel >= we_rel {
                 break 'v;
             }
             match ingest_ms {
@@ -1006,13 +1009,13 @@ fn parse_clicks(ctx: &Ctx, b: &[u8], start: usize, end: usize, adj: isize, ix: &
         if l0 == 0 || l1 == 0 || l2 == 0 {
             return;
         }
+        let Some(camp) = ctx.lk.camp.get(id_key(p2, l2)) else { return };
         let (p3, l3) = fld!(base, rs, q, 3);
         let Some(t) = ts_p(p3, l3, dc) else { return };
         let rel = t - ctx.base;
         if rel < 0 || rel >= ctx.we_rel as i64 {
             return;
         }
-        let Some(camp) = ctx.lk.camp.get(id_key(p2, l2)) else { return };
         let uk = id_key(p1, l1);
         ctx.person.prefetch(uk);
         lc.push(LC { uk, ck: ids::click_word(p0, l0, p0.offset(adj)), ts: rel as u32, camp: camp as u32 });

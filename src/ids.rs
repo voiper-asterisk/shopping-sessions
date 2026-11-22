@@ -123,6 +123,15 @@ pub fn id_key_slice(b: &[u8]) -> u64 {
 }
 
 /// The bytes of a packed (non-hashed) key, first byte lowest, and their count.
+#[cfg(all(target_arch = "x86_64", target_feature = "bmi2"))]
+#[inline(always)]
+pub fn unpack_key(key: u64) -> (u64, u8, usize) {
+    let len = 9 - (key.trailing_zeros() / 7).min(8) as usize;
+    let x = unsafe { std::arch::x86_64::_pdep_u64(key >> 7, 0x7F7F_7F7F_7F7F_7F7F) };
+    (x.swap_bytes(), (key & 0x7F) as u8, len)
+}
+
+#[cfg(not(all(target_arch = "x86_64", target_feature = "bmi2")))]
 #[inline(always)]
 pub fn unpack_key(key: u64) -> (u64, u8, usize) {
     let len = 9 - (key.trailing_zeros() / 7).min(8) as usize;
