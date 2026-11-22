@@ -1,0 +1,21 @@
+[package]
+name = "shopping-sessions"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "shopping-sessions"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+debug = false
+panic = "abort"
+codegen-units = 1
+lto = "fat"
+
+[features]
+prof = []
+selfbench = []
+profgen = []

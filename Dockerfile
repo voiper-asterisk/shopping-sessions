@@ -1,15 +1,12 @@
 # Shopping Sessions High-Performance Data Pipeline
-# Target Architecture: linux/amd64 (Cascade Lake / AVX-512)
-FROM gcc:15-bookworm AS build
-WORKDIR /app
-COPY src/ src/
-RUN g++ -std=c++20 -O3 -flto -march=cascadelake -mtune=cascadelake \
-    -Wa,-mbranches-within-32B-boundaries -fno-plt -static -pthread \
-    -o /app/shopping-sessions src/main.cpp \
-    && strip /app/shopping-sessions
+# Target: linux/amd64 (Cascade Lake / AVX-512)
+FROM rust:1.100-alpine AS build
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+ENV RUSTFLAGS="-C target-cpu=cascadelake -C target-feature=+avx512bw"
+RUN cargo build --release --locked && strip /src/target/release/shopping-sessions
 
 FROM scratch
-COPY --from=build /app/shopping-sessions /shopping-sessions
-USER 1000:1000
-ENV DATA_DIR=/data OUTPUT_DIR=/output
+COPY --from=build /src/target/release/shopping-sessions /shopping-sessions
 CMD ["/shopping-sessions"]
