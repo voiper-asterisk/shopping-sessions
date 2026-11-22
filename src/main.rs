@@ -598,7 +598,7 @@ fn main() {
         }
     }
     sys::xm(62);
-    if !endrel_ran && std::env::var("XL_XREL").map_or(false, |v| v == "1") {
+    if !endrel_ran && std::env::var("XL_XREL").map_or(true, |v| v != "0") {
         sys::exit_release(g.nt, unsafe { &parse::FDS });
     }
     sys::xm_end();

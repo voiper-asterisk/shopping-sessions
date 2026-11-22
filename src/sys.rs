@@ -1309,6 +1309,16 @@ fn a_mine(p: *mut u8) -> bool {
     base != 0 && p as usize >= base && (p as usize) < A_END.load(Ordering::Relaxed)
 }
 
+pub fn a_base() -> usize {
+    A_BASE.load(Ordering::Relaxed)
+}
+pub fn anon_ext(len: usize, align: usize) -> *mut u8 {
+    if A_BASE.load(Ordering::Relaxed) == 0 {
+        return std::ptr::null_mut();
+    }
+    a_region(len, align) as *mut u8
+}
+
 fn a_region(sz: usize, align: usize) -> usize {
     let end = A_END.load(Ordering::Relaxed);
     let mut cur = A_NEXT.load(Ordering::Relaxed);

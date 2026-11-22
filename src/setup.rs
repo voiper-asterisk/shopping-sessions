@@ -1242,9 +1242,9 @@ fn tstate(core: core::Core) -> TState {
 }
 
 fn io_advise(region: *mut u8, len: usize) {
-    const DEF: i32 = crate::env_u32(option_env!("XL_IOADV_DEF"), 3) as i32;
+    const DEF: i32 = crate::env_u32(option_env!("XL_IOADV_DEF"), 2) as i32;
     let adv = std::env::var("XL_IOADV").ok().and_then(|s| s.trim().parse::<i32>().ok()).unwrap_or(DEF);
-    if adv == 2 || adv == 1 || adv == 3 {
+    if adv == 2 || adv == 1 {
         unsafe { madvise(region, len, adv) };
     }
 }

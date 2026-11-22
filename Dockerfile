@@ -3,7 +3,8 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY .cargo .cargo
 COPY src src
-RUN cargo build --release --features w512 --target x86_64-unknown-linux-gnu \
+RUN cargo build --release --target x86_64-unknown-linux-gnu \
+ && strip --strip-all target/x86_64-unknown-linux-gnu/release/pipeline \
  && cp target/x86_64-unknown-linux-gnu/release/pipeline /pipeline
 
 FROM scratch

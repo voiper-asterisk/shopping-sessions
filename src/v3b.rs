@@ -228,7 +228,6 @@ struct ELane<const CS: u32 = 12> {
     sub_n: usize,
     first: Vec<u32>,
 }
-static mut EAB: usize = BLOCK;
 struct EArena {
     cur: *mut u8,
     end: *mut u8,
@@ -246,21 +245,149 @@ impl EArena {
             }
         }
         if self.cur.is_null() || (self.end as usize - self.cur as usize) < bytes {
-            let eab = EAB;
-            let len = ((bytes + BLOCK - 1) & !(BLOCK - 1)).max(eab);
-            self.cur = anon(len);
-            self.end = self.cur.add(len);
-            if eab > BLOCK {
-                let mut o = 0;
-                while o < len {
-                    std::ptr::write_volatile(self.cur.add(o), 0);
-                    o += BLOCK;
-                }
+            let x = if bytes <= EXT_SZ { ext_new(self as *mut EArena as usize) } else { std::ptr::null_mut() };
+            if !x.is_null() {
+                self.cur = x;
+                self.end = x.add(EXT_SZ);
+            } else {
+                let len = (bytes + BLOCK - 1) & !(BLOCK - 1);
+                self.cur = anon(len);
+                self.end = self.cur.add(len);
             }
         }
         let p = self.cur;
         self.cur = p.add(bytes);
         p
+    }
+}
+
+const EXT_B: u32 = crate::env_u32(option_env!("XL_EXTB"), 25);
+const EXT_SZ: usize = 1 << EXT_B;
+const EXT_CAP: usize = 4096;
+const EXT_MAXK: usize = 14;
+const EXT_LIM: usize = 128 << 30;
+static EXT_ON: AtomicBool = AtomicBool::new(false);
+static EXT_N: AtomicUsize = AtomicUsize::new(0);
+static mut EXT_L: [(usize, usize); EXT_CAP] = [(0, 0); EXT_CAP];
+static mut EXT_KEEP: [u64; EXT_LIM >> EXT_B >> 6] = [0; EXT_LIM >> EXT_B >> 6];
+static mut EXT_BASE: usize = 0;
+static mut EXT_NK: usize = 0;
+static ROWS_N: AtomicUsize = AtomicUsize::new(0);
+#[cold]
+#[inline(never)]
+fn ext_new(owner: usize) -> *mut u8 {
+    if !EXT_ON.load(Ordering::Relaxed) {
+        return std::ptr::null_mut();
+    }
+    let p = crate::sys::anon_ext(EXT_SZ, EXT_SZ);
+    if p.is_null() {
+        return p;
+    }
+    let i = EXT_N.fetch_add(1, Ordering::Relaxed);
+    if i < EXT_CAP {
+        unsafe { EXT_L[i] = (p as usize, owner) };
+    }
+    p
+}
+#[inline(always)]
+fn ext_kept(c: usize) -> bool {
+    unsafe {
+        let off = c.wrapping_sub(EXT_BASE);
+        off < EXT_LIM && (EXT_KEEP[off >> EXT_B >> 6] >> ((off >> EXT_B) & 63)) & 1 != 0
+    }
+}
+#[allow(static_mut_refs)]
+fn ext_decide(pm: usize) {
+    if !EXT_ON.load(Ordering::Relaxed) || pm == 0 {
+        return;
+    }
+    unsafe {
+        let n = EXT_N.load(Ordering::Relaxed).min(EXT_CAP);
+        let want = (n * pm / 1000).min(EXT_MAXK);
+        let mut k = 0;
+        for i in 0..n {
+            if k >= want {
+                break;
+            }
+            let (b, o) = EXT_L[i];
+            if (i + 1..n).any(|j| EXT_L[j].1 == o) {
+                let x = (b - EXT_BASE) >> EXT_B;
+                EXT_KEEP[x >> 6] |= 1 << (x & 63);
+                k += 1;
+            }
+        }
+        EXT_NK = k;
+    }
+}
+#[cold]
+#[inline(never)]
+fn ext_check(cx: &Cx) {
+    let (mut n, mut bad) = (0usize, 0usize);
+    let mut one = |p: usize, w: usize| {
+        if w > 0 {
+            n += 1;
+            let p = std::hint::black_box(p);
+            if ext_kept(p) || ext_kept(p + w * 8 - 1) {
+                bad += 1;
+            }
+        }
+    };
+    let mut sl: Vec<(*const u64, usize)> = Vec::new();
+    for tid in 0..cx.t.len() {
+        let t = cx.t(tid);
+        sl.clear();
+        for q in 0..t.u2.s.np {
+            t.u2.s.slices(q, &mut sl);
+            t.u2.w.slices(q, &mut sl);
+        }
+        for q in 0..t.ck.np {
+            t.ck.s.slices(q, &mut sl);
+            t.ck.w.slices(q, &mut sl);
+        }
+        for &(p, w) in sl.iter() {
+            one(p as usize, w);
+        }
+        for &c in t.u2.s.free.iter().chain(t.u2.w.free.iter()) {
+            one(c as usize, 1);
+        }
+    }
+    eprintln!("[e2we] keep check: {n} slices, {bad} in kept extents");
+    if bad != 0 {
+        fallback("e2we keep check");
+    }
+}
+#[cold]
+#[inline(never)]
+#[allow(static_mut_refs)]
+fn ext_poison() -> usize {
+    let mut n = 0;
+    unsafe {
+        for i in 0..EXT_N.load(Ordering::Relaxed).min(EXT_CAP) {
+            let b = EXT_L[i].0;
+            if ext_kept(b) {
+                std::ptr::write_bytes(b as *mut u8, 0xA5, EXT_SZ);
+                n += 1;
+            }
+        }
+    }
+    eprintln!("[e2p] poisoned {n} kept extents");
+    n
+}
+#[allow(static_mut_refs)]
+fn ext_donate() -> usize {
+    unsafe {
+        let mut v: Vec<usize> = (0..EXT_N.load(Ordering::Relaxed).min(EXT_CAP)).map(|i| EXT_L[i].0).filter(|&b| ext_kept(b)).collect();
+        v.sort_unstable();
+        let mut i = 0;
+        while i < v.len() {
+            let mut j = i + 1;
+            while j < v.len() && v[j] == v[j - 1] + EXT_SZ {
+                j += 1;
+            }
+            crate::sys::donate(v[i], (j - i) * EXT_SZ);
+            i = j;
+        }
+        v.len() * EXT_SZ
     }
 }
 core::arch::global_asm!(
@@ -1147,6 +1274,7 @@ impl LB {
             c as *mut u64
         }
     }
+    #[cfg(feature = "w512")]
     #[inline(always)]
     unsafe fn line(&mut self, s: *mut LStage, v: std::arch::x86_64::__m512i, valid: usize) {
         let mut w = (*s).wptr;
@@ -1163,6 +1291,25 @@ impl LB {
         (*s).wptr = w.add(8);
         (*s).nwords += valid;
     }
+    #[cfg(not(feature = "w512"))]
+    #[inline(always)]
+    unsafe fn line(&mut self, s: *mut LStage, v0: std::arch::x86_64::__m256i, v1: std::arch::x86_64::__m256i, valid: usize) {
+        let mut w = (*s).wptr;
+        if w.is_null() || (w as usize & (CHUNK - 1)) == CW * 8 {
+            let c = self.chunk();
+            if w.is_null() {
+                (*s).head = c;
+            } else {
+                *(w as *mut *mut u64) = c;
+            }
+            w = c;
+        }
+        std::arch::x86_64::_mm256_stream_si256(w as *mut _, v0);
+        std::arch::x86_64::_mm256_stream_si256(w.add(4) as *mut _, v1);
+        (*s).wptr = w.add(8);
+        (*s).nwords += valid;
+    }
+    #[cfg(feature = "w512")]
     #[inline(always)]
     unsafe fn put(&mut self, p: usize, mut src: *const u64, mut n: usize) {
         use std::arch::x86_64::*;
@@ -1188,6 +1335,39 @@ impl LB {
         _mm512_store_si512(dp as *mut _, _mm512_maskz_loadu_epi64(_bzhi_u32(0xFF, n as u32) as __mmask8, src as *const i64));
         (*s).fill = n;
     }
+    #[cfg(not(feature = "w512"))]
+    #[inline(always)]
+    unsafe fn put(&mut self, p: usize, mut src: *const u64, mut n: usize) {
+        use std::arch::x86_64::*;
+        let s = self.st.add(p);
+        let f = (*s).fill;
+        let dp = (*s).data.as_mut_ptr() as *mut __m256i;
+        let (t0, t1) = (_mm256_load_si256(dp as *const _), _mm256_load_si256(dp.add(1) as *const _));
+        if f + n < 8 {
+            let m = _bzhi_u32(0xFF, n as u32) << f;
+            let (m0, m1) = ((m & 15) as __mmask8, (m >> 4) as __mmask8);
+            _mm256_store_si256(dp, _mm256_mask_expandloadu_epi64(t0, m0, src as *const i64));
+            _mm256_store_si256(dp.add(1), _mm256_mask_expandloadu_epi64(t1, m1, src.add((m & 15).count_ones() as usize) as *const i64));
+            (*s).fill = f + n;
+            return;
+        }
+        let m = (0xFFu32 << f) & 0xFF;
+        let v0 = _mm256_mask_expandloadu_epi64(t0, (m & 15) as __mmask8, src as *const i64);
+        let v1 = _mm256_mask_expandloadu_epi64(t1, (m >> 4) as __mmask8, src.add((m & 15).count_ones() as usize) as *const i64);
+        self.line(s, v0, v1, 8);
+        src = src.add(8 - f);
+        n -= 8 - f;
+        while n >= 8 {
+            self.line(s, _mm256_loadu_si256(src as *const _), _mm256_loadu_si256(src.add(4) as *const _), 8);
+            src = src.add(8);
+            n -= 8;
+        }
+        let m = _bzhi_u32(0xFF, n as u32);
+        _mm256_store_si256(dp, _mm256_maskz_loadu_epi64((m & 15) as __mmask8, src as *const i64));
+        _mm256_store_si256(dp.add(1), _mm256_maskz_loadu_epi64((m >> 4) as __mmask8, src.add(4) as *const i64));
+        (*s).fill = n;
+    }
+    #[cfg(feature = "w512")]
     fn finish(&mut self) {
         unsafe {
             for p in 0..self.np {
@@ -1195,6 +1375,21 @@ impl LB {
                 let f = (*s).fill;
                 if f > 0 {
                     self.line(s, std::arch::x86_64::_mm512_load_si512((*s).data.as_ptr() as *const _), f);
+                    (*s).fill = 0;
+                }
+            }
+            std::arch::x86_64::_mm_sfence();
+        }
+    }
+    #[cfg(not(feature = "w512"))]
+    fn finish(&mut self) {
+        unsafe {
+            for p in 0..self.np {
+                let s = self.st.add(p);
+                let f = (*s).fill;
+                if f > 0 {
+                    let dp = (*s).data.as_ptr() as *const std::arch::x86_64::__m256i;
+                    self.line(s, std::arch::x86_64::_mm256_load_si256(dp), std::arch::x86_64::_mm256_load_si256(dp.add(1)), f);
                     (*s).fill = 0;
                 }
             }
@@ -1362,6 +1557,49 @@ unsafe fn ckrec_put(sc: &mut ECur<CKS>, wc: &mut ECur<CKS>, b2: u32, rel: u64, c
     }
 }
 
+#[inline(always)]
+fn opq64(x: u64) -> u64 {
+    #[cfg(feature = "w512")]
+    {
+        x
+    }
+    #[cfg(not(feature = "w512"))]
+    {
+        let r: u64;
+        unsafe { core::arch::asm!("/* {0} */", inout(reg) x => r, options(pure, nomem, nostack, preserves_flags)) };
+        r
+    }
+}
+#[cfg(not(feature = "w512"))]
+#[inline(always)]
+unsafe fn opqv(v: std::arch::x86_64::__m256i) -> std::arch::x86_64::__m256i {
+    let r: std::arch::x86_64::__m256i;
+    core::arch::asm!("/* {0} */", inout(ymm_reg) v => r, options(pure, nomem, nostack, preserves_flags));
+    r
+}
+#[cfg(not(feature = "w512"))]
+#[inline(always)]
+unsafe fn opqx(v: std::arch::x86_64::__m128i) -> std::arch::x86_64::__m128i {
+    let r: std::arch::x86_64::__m128i;
+    core::arch::asm!("/* {0} */", inout(xmm_reg) v => r, options(pure, nomem, nostack, preserves_flags));
+    r
+}
+#[cfg(not(feature = "w512"))]
+#[inline(always)]
+unsafe fn max4_epu64(v: std::arch::x86_64::__m256i) -> u64 {
+    use std::arch::x86_64::*;
+    let x = _mm_max_epu64(_mm256_castsi256_si128(v), _mm256_extracti128_si256::<1>(v));
+    _mm_cvtsi128_si64(_mm_max_epu64(x, _mm_unpackhi_epi64(x, x))) as u64
+}
+#[cfg(not(feature = "w512"))]
+#[inline(always)]
+unsafe fn or8_epi32(v: std::arch::x86_64::__m256i) -> u32 {
+    use std::arch::x86_64::*;
+    let x = _mm_or_si128(_mm256_castsi256_si128(v), _mm256_extracti128_si256::<1>(v));
+    let y = _mm_cvtsi128_si64(_mm_or_si128(x, _mm_unpackhi_epi64(x, x))) as u64;
+    (y | y >> 32) as u32
+}
+
 trait Rec: Copy {
     fn w0(&self) -> u64;
     fn ext(&self) -> (u64, u64);
@@ -1400,6 +1638,7 @@ impl Rec for u64 {
     fn usort(v: &mut [Self]) {
         v.sort_unstable();
     }
+    #[cfg(feature = "w512")]
     #[inline(always)]
     fn unordered(v: &[Self], from: usize) -> usize {
         use std::arch::x86_64::*;
@@ -1415,6 +1654,29 @@ impl Rec for u64 {
                     return i + m.trailing_zeros() as usize;
                 }
                 i += 8;
+            }
+            while i < n && *p.add(i) >> 32 >= *p.add(i - 1) >> 32 {
+                i += 1;
+            }
+        }
+        i
+    }
+    #[cfg(not(feature = "w512"))]
+    #[inline(always)]
+    fn unordered(v: &[Self], from: usize) -> usize {
+        use std::arch::x86_64::*;
+        let n = v.len();
+        let mut i = from;
+        unsafe {
+            let p = v.as_ptr();
+            while i + 4 <= n {
+                let a = _mm256_srli_epi64::<32>(_mm256_loadu_si256(p.add(i) as *const _));
+                let b = _mm256_srli_epi64::<32>(_mm256_loadu_si256(p.add(i - 1) as *const _));
+                let m = _mm256_cmplt_epu64_mask(a, b);
+                if m != 0 {
+                    return i + m.trailing_zeros() as usize;
+                }
+                i += 4;
             }
             while i < n && *p.add(i) >> 32 >= *p.add(i - 1) >> 32 {
                 i += 1;
@@ -1520,6 +1782,7 @@ impl GTab {
             *self.used.get_unchecked_mut(b) = 1;
         }
     }
+    #[cfg(feature = "w512")]
     #[inline(always)]
     fn walk(&mut self, nb: usize, clear: bool, mut f: impl FnMut(&mut [u32], usize)) {
         use std::arch::x86_64::*;
@@ -1530,6 +1793,28 @@ impl GTab {
                 let x = _mm512_test_epi8_mask(v, v);
                 if clear && x != 0 {
                     _mm512_storeu_si512(p as *mut _, _mm512_setzero_si512());
+                }
+                x
+            };
+            while x != 0 {
+                let b = wi * 64 + x.trailing_zeros() as usize;
+                x &= x - 1;
+                f(&mut self.cnt, b);
+            }
+        }
+    }
+    #[cfg(not(feature = "w512"))]
+    #[inline(always)]
+    fn walk(&mut self, nb: usize, clear: bool, mut f: impl FnMut(&mut [u32], usize)) {
+        use std::arch::x86_64::*;
+        for wi in 0..nb / 64 {
+            let mut x = unsafe {
+                let p = self.used.as_mut_ptr().add(wi * 64);
+                let (v0, v1) = (_mm256_loadu_si256(p as *const _), _mm256_loadu_si256(p.add(32) as *const _));
+                let x = _mm256_test_epi8_mask(v0, v0) as u64 | opq64(_mm256_test_epi8_mask(v1, v1) as u64) << 32;
+                if clear && x != 0 {
+                    _mm256_storeu_si256(p as *mut _, _mm256_setzero_si256());
+                    _mm256_storeu_si256(p.add(32) as *mut _, _mm256_setzero_si256());
                 }
                 x
             };
@@ -3372,8 +3657,25 @@ struct Runs {
     nfw: usize,
 }
 
+const BMW: usize = 1 << (BMB - 6);
+#[inline(always)]
+unsafe fn bm_mark(bm: *mut u64, cl: *mut usize, nc: usize, ix: u64) -> usize {
+    let w = (ix >> 6) as usize;
+    let s = *bm.add(w);
+    *bm.add(w) = s | 1u64 << (ix & 63);
+    *cl.add(nc) = ix as usize;
+    nc + ((s >> (ix & 63)) & 1) as usize
+}
 #[inline(never)]
-unsafe fn dd_mark_s(ptr: *const u64, n: usize, nptr: *const u64, nn: usize, bm: *mut u64) {
+unsafe fn bm_twice(bm: *mut u64, cl: *const usize, nc: usize) {
+    let tw = bm.add(BMW);
+    for i in 0..nc {
+        let ix = *cl.add(i);
+        *tw.add(ix >> 6) |= 1u64 << (ix & 63);
+    }
+}
+#[inline(never)]
+unsafe fn dd_mark_s(ptr: *const u64, n: usize, nptr: *const u64, nn: usize, bm: *mut u64, cl: *mut usize, mut nc: usize) -> usize {
     use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
     let mut k = 0;
     while k < n {
@@ -3383,25 +3685,18 @@ unsafe fn dd_mark_s(ptr: *const u64, n: usize, nptr: *const u64, nn: usize, bm: 
         if k + 8 <= n {
             for j in 0..4 {
                 let ix = (*ptr.add(k + 2 * j) >> 35) & BMM;
-                let w = (ix >> 6) as usize * 2;
-                let bit = 1u64 << (ix & 63);
-                let s = *bm.add(w);
-                *bm.add(w + 1) |= s & bit;
-                *bm.add(w) = s | bit;
+                nc = bm_mark(bm, cl, nc, ix);
             }
             k += 8;
             continue;
         }
         while k < n {
             let ix = (*ptr.add(k) >> 35) & BMM;
-            let w = (ix >> 6) as usize * 2;
-            let bit = 1u64 << (ix & 63);
-            let s = *bm.add(w);
-            *bm.add(w + 1) |= s & bit;
-            *bm.add(w) = s | bit;
+            nc = bm_mark(bm, cl, nc, ix);
             k += 2;
         }
     }
+    nc
 }
 #[inline(always)]
 unsafe fn dd_ld(p: *const u64) -> std::arch::x86_64::__m256i {
@@ -3430,7 +3725,7 @@ unsafe fn dd_ld4(base: *const u64, i0: usize, i1: usize, i2: usize, i3: usize) -
     r
 }
 #[inline(never)]
-unsafe fn dd_mark_w(ptr: *const u64, n: usize, nptr: *const u64, nn: usize, bm: *mut u64) {
+unsafe fn dd_mark_w(ptr: *const u64, n: usize, nptr: *const u64, nn: usize, bm: *mut u64, cl: *mut usize, mut nc: usize) -> usize {
     use std::arch::x86_64::*;
     let v_bmm = _mm256_set1_epi64x(BMM as i64);
     let v3 = _mm256_set1_epi64x(3);
@@ -3452,12 +3747,7 @@ unsafe fn dd_mark_w(ptr: *const u64, n: usize, nptr: *const u64, nn: usize, bm: 
         let ix = _mm256_and_si256(_mm256_mask_blend_epi64(kse, hx, _mm256_srli_epi64::<35>(x0)), v_bmm);
         _mm256_storeu_si256(ixs.as_mut_ptr() as *mut __m256i, ix);
         for j in 0..4 {
-            let ix = ixs[j];
-            let w = (ix >> 6) as usize * 2;
-            let bit = 1u64 << (ix & 63);
-            let s = *bm.add(w);
-            *bm.add(w + 1) |= s & bit;
-            *bm.add(w) = s | bit;
+            nc = bm_mark(bm, cl, nc, ixs[j]);
         }
         k += 16;
     }
@@ -3470,23 +3760,20 @@ unsafe fn dd_mark_w(ptr: *const u64, n: usize, nptr: *const u64, nn: usize, bm: 
             let r = ptr.add(k);
             let hx = bm_key(Key { hi: *r, lo: *r.add(1) });
             let ix = if *r.add(3) & 3 == WT_SE { (*r >> 35) & BMM } else { hx };
-            let w = (ix >> 6) as usize * 2;
-            let bit = 1u64 << (ix & 63);
-            let s = *bm.add(w);
-            *bm.add(w + 1) |= s & bit;
-            *bm.add(w) = s | bit;
+            nc = bm_mark(bm, cl, nc, ix);
             k += 4;
         }
     }
+    nc
 }
 #[inline(never)]
-unsafe fn dd_scan_s(ptr: *const u64, n: usize, bm: *const u64, ca: *mut u64, cb: *mut u64, ow: *mut u64, oq: *mut u32, rb: u32) -> (usize, usize) {
+unsafe fn dd_scan_s(ptr: *const u64, n: usize, bm: *const u64, ca: *mut u64, cb: *mut u64, ow: *mut u64, oq: *mut u32, rb: u32, nptr: *const u64, nn: usize) -> (usize, usize) {
     use std::arch::x86_64::*;
     let rmask = (1u64 << rb) - 1;
     let (mut c, mut m) = (0usize, 0usize);
     let mut k = 0;
-    const WIM: u64 = (BMM >> 6) << 1;
-    let bm1 = bm.add(1);
+    const WIM: u64 = BMM >> 6;
+    let bm1 = bm.add(BMW);
     let v63 = _mm256_set1_epi64x(63);
     let v1 = _mm256_set1_epi64x(1);
     let v2 = _mm256_set1_epi64x(2);
@@ -3497,13 +3784,16 @@ unsafe fn dd_scan_s(ptr: *const u64, n: usize, bm: *const u64, ca: *mut u64, cb:
     let vrmask = _mm256_set1_epi64x(rmask as i64);
     let vrb = _mm_cvtsi32_si128(rb as i32);
     while k + 8 <= n {
+        if k < nn {
+            _mm_prefetch(nptr.add(k) as *const i8, _MM_HINT_T0);
+        }
         let r0 = _mm256_loadu_si256(ptr.add(k) as *const __m256i);
         let r1: __m256i;
         std::arch::asm!("vmovdqu {r}, ymmword ptr [{p} + 32]", r = lateout(ymm_reg) r1, p = in(reg) ptr.add(k), options(pure, readonly, nostack, preserves_flags));
         let va = _mm256_permute4x64_epi64::<0b11011000>(_mm256_unpacklo_epi64(r0, r1));
         let vb = _mm256_permute4x64_epi64::<0b11011000>(_mm256_unpackhi_epi64(r0, r1));
         let p = ptr.add(k);
-        let g = dd_ld4(bm1, ((*p >> 40) & WIM) as usize, ((*p.add(2) >> 40) & WIM) as usize, ((*p.add(4) >> 40) & WIM) as usize, ((*p.add(6) >> 40) & WIM) as usize);
+        let g = dd_ld4(bm1, ((*p >> 41) & WIM) as usize, ((*p.add(2) >> 41) & WIM) as usize, ((*p.add(4) >> 41) & WIM) as usize, ((*p.add(6) >> 41) & WIM) as usize);
         let ktw = _mm256_test_epi64_mask(_mm256_srlv_epi64(g, _mm256_and_si256(_mm256_srli_epi64::<35>(va), v63)), v1);
         let kinv = _mm256_test_epi64_mask(vb, v2);
         let keep = !(ktw | kinv) & 0xF;
@@ -3522,7 +3812,7 @@ unsafe fn dd_scan_s(ptr: *const u64, n: usize, bm: *const u64, ca: *mut u64, cb:
     while k < n {
         let (a, b) = (*ptr.add(k), *ptr.add(k + 1));
         let ix = (a >> 35) & BMM;
-        let tw = (*bm.add((ix >> 6) as usize * 2 + 1) >> (ix & 63)) & 1;
+        let tw = (*bm.add(BMW + (ix >> 6) as usize) >> (ix & 63)) & 1;
         *ca.add(c) = a;
         *cb.add(c) = b;
         c += tw as usize;
@@ -3586,7 +3876,7 @@ unsafe fn dd_vhash(hi: std::arch::x86_64::__m256i, lo: std::arch::x86_64::__m256
     _mm256_xor_si256(x, _mm256_srli_epi64::<32>(x))
 }
 #[inline(never)]
-unsafe fn dd_scan_w(ptr: *const u64, n: usize, bm: *const u64, cptr: *mut usize, o: &WOut, b2: u32) -> (usize, usize, usize) {
+unsafe fn dd_scan_w(ptr: *const u64, n: usize, bm: *const u64, cptr: *mut usize, o: &WOut, b2: u32, nptr: *const u64, nn: usize) -> (usize, usize, usize) {
     use std::arch::x86_64::*;
     let rb = 42 - b2;
     let (mut c, mut m1, mut m2) = (0usize, 0usize, 0usize);
@@ -3607,9 +3897,13 @@ unsafe fn dd_scan_w(ptr: *const u64, n: usize, bm: *const u64, cptr: *mut usize,
     let vnb2 = _mm_cvtsi32_si128(64 - b2 as i32);
     let voff = _mm256_set_epi64x(97, 65, 33, 1);
     let zero = _mm256_setzero_si256();
-    let bm1 = bm.add(1);
+    let bm1 = bm.add(BMW);
     let mut wis = [0u64; 4];
     while k + 16 <= n {
+        if k + 8 < nn {
+            _mm_prefetch(nptr.add(k) as *const i8, _MM_HINT_T0);
+            _mm_prefetch(nptr.add(k + 8) as *const i8, _MM_HINT_T0);
+        }
         let r = ptr.add(k);
         let (r0, r1, r2, r3) = (dd_ld(r), dd_ld(r.add(4)), dd_ld(r.add(8)), dd_ld(r.add(12)));
         let (t0, t1, t2, t3) = (_mm256_unpacklo_epi64(r0, r1), _mm256_unpackhi_epi64(r0, r1), _mm256_unpacklo_epi64(r2, r3), _mm256_unpackhi_epi64(r2, r3));
@@ -3620,7 +3914,7 @@ unsafe fn dd_scan_w(ptr: *const u64, n: usize, bm: *const u64, cptr: *mut usize,
         let kse = _mm256_testn_epi64_mask(x3, v3);
         let hx = _mm256_srli_epi64::<20>(dd_vhash(x0, x1));
         let ix = _mm256_and_si256(_mm256_mask_blend_epi64(kse, hx, _mm256_srli_epi64::<35>(x0)), v_bmm);
-        _mm256_storeu_si256(wis.as_mut_ptr() as *mut __m256i, _mm256_slli_epi64::<1>(_mm256_srli_epi64::<6>(ix)));
+        _mm256_storeu_si256(wis.as_mut_ptr() as *mut __m256i, _mm256_srli_epi64::<6>(ix));
         let g = dd_ld4(bm1, wis[0] as usize, wis[1] as usize, wis[2] as usize, wis[3] as usize);
         let ktw = _mm256_test_epi64_mask(_mm256_srlv_epi64(g, _mm256_and_si256(ix, v63)), v1);
         let keep = !(ktw | _mm256_test_epi64_mask(x3, v4)) & 0xF;
@@ -3660,7 +3954,7 @@ unsafe fn dd_scan_w(ptr: *const u64, n: usize, bm: *const u64, cptr: *mut usize,
         let se = x3 & 3 == WT_SE;
         let hx = bm_key(Key { hi: x0, lo: x1 });
         let ix = if se { (x0 >> 35) & BMM } else { hx };
-        let tw = (*bm.add((ix >> 6) as usize * 2 + 1) >> (ix & 63)) & 1;
+        let tw = (*bm.add(BMW + (ix >> 6) as usize) >> (ix & 63)) & 1;
         *cptr.add(c) = r as usize | 1;
         c += tw as usize;
         let keep = (tw ^ 1) & !(x3 >> 2) & 1;
@@ -3802,6 +4096,136 @@ unsafe fn dd_drain_w(t: &mut T3, b2: u32, r: &mut Runs) {
     r.nfw = 0;
 }
 
+const RGW: usize = 16;
+const RGP: usize = 8;
+#[derive(Clone, Copy)]
+struct Rg {
+    b: *mut u64,
+    f: *mut u8,
+    wp: *mut *mut u64,
+    nw: *mut usize,
+}
+const RG_START: usize = CW * 8;
+unsafe fn rg_init(v: &mut Vec<u64>, f: &mut Vec<u8>, np2: usize) -> Rg {
+    v.clear();
+    v.resize(np2 * RGW + 8 + 2 * np2, 0);
+    f.clear();
+    f.resize(np2, 0);
+    let a = v.as_mut_ptr();
+    let b = a.add(((64 - (a as usize & 63)) & 63) >> 3);
+    let wp = b.add(np2 * RGW) as *mut *mut u64;
+    for q in 0..np2 {
+        *wp.add(q) = RG_START as *mut u64;
+    }
+    Rg { b, f: f.as_mut_ptr(), wp, nw: b.add(np2 * RGW + np2) as *mut usize }
+}
+#[cold]
+#[inline(never)]
+unsafe fn rg_chunk(vb: &mut VB, q: usize, w: *mut u64) -> *mut u64 {
+    let c = vb.chunk();
+    if w as usize == RG_START {
+        (*vb.st.add(q)).head = c;
+    } else {
+        *(w as *mut *mut u64) = c;
+    }
+    c
+}
+#[inline(always)]
+unsafe fn rg_line(vb: &mut VB, r: Rg, q: usize, src: *const u64) {
+    let mut w = *r.wp.add(q);
+    if (w as usize) & (CHUNK - 1) == CW * 8 {
+        w = rg_chunk(vb, q, w);
+    }
+    nt_line(w, src);
+    *r.wp.add(q) = w.add(8);
+    *r.nw.add(q) += 8;
+}
+#[inline(never)]
+unsafe fn rg_push_s(vb: &mut VB, r: Rg, ow: *const u64, oq: *const u32, m: usize) {
+    use std::arch::x86_64::{_mm_prefetch, _MM_HINT_ET0};
+    for j in 0..m {
+        let qa = *oq.add((j + RGP).min(m - 1)) as usize;
+        _mm_prefetch(r.b.add(qa * RGW) as *const i8, _MM_HINT_ET0);
+        let q = *oq.add(j) as usize;
+        let k = *r.f.add(q) as usize;
+        let d = r.b.add(q * RGW);
+        *d.add(k) = *ow.add(j);
+        if k == 7 {
+            rg_line(vb, r, q, d);
+            *r.f.add(q) = 0;
+        } else {
+            *r.f.add(q) = (k + 1) as u8;
+        }
+    }
+}
+#[inline(never)]
+unsafe fn rg_push_s2(vb: &mut VB, np: *mut u32, r: Rg, o: &WOut, m: usize) {
+    use std::arch::x86_64::{_mm_prefetch, _MM_HINT_ET0};
+    for j in 0..m {
+        let qa = (*o.sq.add((j + RGP).min(m - 1)) & 0xFFFF) as usize;
+        _mm_prefetch(r.b.add(qa * RGW) as *const i8, _MM_HINT_ET0);
+        let e = *o.sq.add(j);
+        let q = (e & 0xFFFF) as usize;
+        let pur = (e >> 16) as usize;
+        let k = *r.f.add(q) as usize;
+        let d = r.b.add(q * RGW);
+        *d.add(k) = *o.sw.add(j);
+        *d.add(k + 1) = *o.sp.add(j);
+        *np.add(q) += pur as u32;
+        let mut k2 = k + 1 + pur;
+        if k2 >= 8 {
+            rg_line(vb, r, q, d);
+            *d = *d.add(8);
+            k2 -= 8;
+        }
+        *r.f.add(q) = k2 as u8;
+    }
+}
+#[inline(never)]
+unsafe fn rg_push_w(vb: &mut VB, r: Rg, o: &WOut, m: usize) {
+    use std::arch::x86_64::*;
+    for j in 0..m {
+        let ja = (j + RGP).min(m - 1);
+        let qa = (*o.wq.add(ja) & 0xFFFF) as usize;
+        let pa = r.b.add(qa * RGW);
+        _mm_prefetch(pa as *const i8, _MM_HINT_ET0);
+        _mm_prefetch(pa.add(*r.f.add(qa) as usize + 3) as *const i8, _MM_HINT_ET0);
+        let e = *o.wq.add(j);
+        let q = (e & 0xFFFF) as usize;
+        let pur = (e >> 16) as usize;
+        let k = *r.f.add(q) as usize;
+        let d = r.b.add(q * RGW);
+        *d.add(k) = *o.wa.add(j);
+        *d.add(k + 1) = *o.wl.add(j);
+        *d.add(k + 2) = *o.wh.add(j);
+        *d.add(k + 3) = *o.wp.add(j);
+        let mut k2 = k + 3 + pur;
+        if k2 >= 8 {
+            rg_line(vb, r, q, d);
+            _mm256_store_si256(d as *mut __m256i, _mm256_load_si256(d.add(8) as *const __m256i));
+            k2 -= 8;
+        }
+        *r.f.add(q) = k2 as u8;
+    }
+}
+unsafe fn rg_fin(vb: &mut VB, r: Rg, np2: usize) {
+    for q in 0..np2 {
+        let k = *r.f.add(q) as usize;
+        if k > 0 {
+            rg_line(vb, r, q, r.b.add(q * RGW));
+            *r.nw.add(q) -= 8 - k;
+            *r.f.add(q) = 0;
+        }
+        let w = *r.wp.add(q);
+        let s = vb.st.add(q);
+        if w as usize != RG_START {
+            (*s).wptr = w;
+        }
+        (*s).nwords += *r.nw.add(q);
+        *r.nw.add(q) = 0;
+    }
+}
+
 fn dedup_thread(cx: &Cx, tid: usize) {
     use std::arch::x86_64::_rdtsc;
     let nt = cx.t.len();
@@ -3816,37 +4240,21 @@ fn dedup_thread(cx: &Cx, tid: usize) {
         fallback("dedup: user partitions over 2^16");
     }
     me.seen.resize(2 << (BMB - 6), 0);
-    me.ms.resize((np2 + 2) * MSW + 8, 0);
-    me.mw.resize((np2 + 2) * MWW + 8, 0);
-    me.msf.resize(np2, 0);
-    me.mwf.resize(np2, 0);
-    me.fl.resize(DFL + DREC + 8, 0);
-    me.flw.resize(DFL + DREC + 8, 0);
+    let rs = unsafe { rg_init(&mut me.ms, &mut me.msf, np2) };
+    let rw = unsafe { rg_init(&mut me.mw, &mut me.mwf, np2) };
     me.ow.resize(DREC + 8, 0);
     me.oq.resize(DREC + 8, 0);
     me.so.resize(2 * (DREC + 8), 0);
     me.sq.resize(DREC + 8, 0);
     me.wo.resize(4 * (DREC + 8), 0);
     me.wq.resize(DREC + 8, 0);
-    let mut rn = unsafe {
-        let (a, b) = (me.ms.as_mut_ptr(), me.mw.as_mut_ptr());
-        Runs {
-            ms: a.add(((64 - (a as usize & 63)) & 63) >> 3),
-            mw: b.add(((64 - (b as usize & 63)) & 63) >> 3),
-            msf: me.msf.as_mut_ptr(),
-            mwf: me.mwf.as_mut_ptr(),
-            fl: me.fl.as_mut_ptr(),
-            flw: me.flw.as_mut_ptr(),
-            nf: 0,
-            nfw: 0,
-        }
-    };
     let (ow, oq) = (me.ow.as_mut_ptr(), me.oq.as_mut_ptr());
     let wout = unsafe {
         let (so, wo) = (me.so.as_mut_ptr(), me.wo.as_mut_ptr());
         WOut { sw: so, sp: so.add(DREC + 8), sq: me.sq.as_mut_ptr(), wa: wo, wl: wo.add(DREC + 8), wh: wo.add(2 * (DREC + 8)), wp: wo.add(3 * (DREC + 8)), wq: me.wq.as_mut_ptr() }
     };
     let mut kept = 0u64;
+    let mut rel_tmp: Vec<*mut u8> = Vec::with_capacity(4096);
     #[inline(always)]
     fn pf_slice(sl: &[(*const u64, usize)], i: usize) {
         if let Some(&(p, n)) = sl.get(i) {
@@ -3878,31 +4286,31 @@ fn dedup_thread(cx: &Cx, tid: usize) {
         me.dc[0] += g0 - gs;
         me.seen.fill(0);
         let bm = me.seen.as_mut_ptr();
+        me.cptr.clear();
+        me.cptr.reserve(nw / 2 + 16);
+        let cl = me.cptr.as_mut_ptr();
+        let mut ncl = 0usize;
         pf_slice(&me.ssl, 0);
         for (i, &(ptr, n)) in me.ssl.iter().enumerate() {
             let (nptr, nn) = me.ssl.get(i + 1).copied().unwrap_or((ptr, 0));
-            unsafe { dd_mark_s(ptr, n, nptr, nn, bm) };
+            ncl = unsafe { dd_mark_s(ptr, n, nptr, nn, bm, cl, ncl) };
         }
         pf_slice(&me.wsl, 0);
         for (i, &(ptr, n)) in me.wsl.iter().enumerate() {
             let (nptr, nn) = me.wsl.get(i + 1).copied().unwrap_or((ptr, 0));
-            unsafe { dd_mark_w(ptr, n, nptr, nn, bm) };
+            ncl = unsafe { dd_mark_w(ptr, n, nptr, nn, bm, cl, ncl) };
         }
         for &(ptr, n) in me.xsl.iter() {
             let mut k = 0;
             while k < n {
                 unsafe {
-                    let ix = x_index(ptr.add(k), sh);
-                    let w = (ix >> 6) as usize * 2;
-                    let bit = 1u64 << (ix & 63);
-                    let s = *bm.add(w);
-                    *bm.add(w + 1) |= s & bit;
-                    *bm.add(w) = s | bit;
+                    ncl = bm_mark(bm, cl, ncl, x_index(ptr.add(k), sh));
                 }
                 k += 8;
             }
         }
-        let twice = |ix: u64| unsafe { (*bm.add((ix >> 6) as usize * 2 + 1) >> (ix & 63)) & 1 };
+        unsafe { bm_twice(bm, cl, ncl) };
+        let twice = |ix: u64| unsafe { (*bm.add(BMW + (ix >> 6) as usize) >> (ix & 63)) & 1 };
         me.dc[1] += unsafe { _rdtsc() } - g0;
         t.prof[0] += tick(&mut tk);
         me.cptr.clear();
@@ -3916,40 +4324,33 @@ fn dedup_thread(cx: &Cx, tid: usize) {
         let (ca, cb) = (me.ca.as_mut_ptr(), me.cb.as_mut_ptr());
         let mut ncs = 0usize;
         let c0 = unsafe { _rdtsc() };
-        for &(ptr, n) in me.ssl.iter() {
+        for (i, &(ptr, n)) in me.ssl.iter().enumerate() {
+            let (nptr, nn) = me.ssl.get(i + 1).copied().unwrap_or((ptr, 0));
             let mut o = 0;
             while o < n {
                 let nb = (n - o).min(2 * DREC);
                 unsafe {
-                    let (c, m) = dd_scan_s(ptr.add(o), nb, bm, ca.add(ncs), cb.add(ncs), ow, oq, rb);
+                    let (c, m) = dd_scan_s(ptr.add(o), nb, bm, ca.add(ncs), cb.add(ncs), ow, oq, rb, nptr.wrapping_add(o), nn.saturating_sub(o));
                     ncs += c;
                     kept += m as u64;
-                    dd_push_s(t, b2, &mut rn, ow, oq, m);
-                    if rn.nf >= DFL {
-                        dd_drain_s(t, b2, &mut rn);
-                    }
+                    rg_push_s(&mut t.u2.s, rs, ow, oq, m);
                 }
                 o += nb;
             }
         }
         let c1 = unsafe { _rdtsc() };
         me.cyc[3] += c1 - c0;
-        for &(ptr, n) in me.wsl.iter() {
+        for (i, &(ptr, n)) in me.wsl.iter().enumerate() {
+            let (nptr, nn) = me.wsl.get(i + 1).copied().unwrap_or((ptr, 0));
             let mut o = 0;
             while o < n {
                 let nb = (n - o).min(4 * DREC);
                 unsafe {
-                    let (c, m1, m2) = dd_scan_w(ptr.add(o), nb, bm, cptr.add(nc), &wout, b2);
+                    let (c, m1, m2) = dd_scan_w(ptr.add(o), nb, bm, cptr.add(nc), &wout, b2, nptr.wrapping_add(o), nn.saturating_sub(o));
                     nc += c;
                     kept += (m1 + m2) as u64;
-                    dd_push_s2(t, b2, &mut rn, &wout, m1);
-                    dd_push_w(t, b2, &mut rn, &wout, m2);
-                    if rn.nf >= DFL {
-                        dd_drain_s(t, b2, &mut rn);
-                    }
-                    if rn.nfw >= DFL {
-                        dd_drain_w(t, b2, &mut rn);
-                    }
+                    rg_push_s2(&mut t.u2.s, t.u2.np.as_mut_ptr(), rs, &wout, m1);
+                    rg_push_w(&mut t.u2.w, rw, &wout, m2);
                 }
                 o += nb;
             }
@@ -3963,7 +4364,14 @@ fn dedup_thread(cx: &Cx, tid: usize) {
                         *cptr.add(nc) = r as usize | 1;
                         nc += 1;
                     } else if *r.add(3) & WT_INV == 0 {
-                        emit_w(t, b2, *r.add(3) & !15, *r.add(2), *r.add(4));
+                        let (w0, uh, ul) = (*r.add(3) & !15, *r.add(2), *r.add(4));
+                        if uh == 0 && ul < SHORT_END {
+                            wout.put_s(0, w0, ul, b2);
+                            rg_push_s2(&mut t.u2.s, t.u2.np.as_mut_ptr(), rs, &wout, 1);
+                        } else {
+                            wout.put_w(0, w0, uh, ul, b2);
+                            rg_push_w(&mut t.u2.w, rw, &wout, 1);
+                        }
                         kept += 1;
                     }
                 }
@@ -4067,10 +4475,7 @@ fn dedup_thread(cx: &Cx, tid: usize) {
             }
             kept += m as u64;
             unsafe {
-                dd_push_s(t, b2, &mut rn, ow, oq, m);
-                if rn.nf >= DFL {
-                    dd_drain_s(t, b2, &mut rn);
-                }
+                rg_push_s(&mut t.u2.s, rs, ow, oq, m);
             }
         }
         let mut j = 0;
@@ -4094,50 +4499,35 @@ fn dedup_thread(cx: &Cx, tid: usize) {
             }
             kept += (m1 + m2) as u64;
             unsafe {
-                dd_push_s2(t, b2, &mut rn, &wout, m1);
-                dd_push_w(t, b2, &mut rn, &wout, m2);
-                if rn.nf >= DFL {
-                    dd_drain_s(t, b2, &mut rn);
-                }
-                if rn.nfw >= DFL {
-                    dd_drain_w(t, b2, &mut rn);
-                }
+                rg_push_s2(&mut t.u2.s, t.u2.np.as_mut_ptr(), rs, &wout, m1);
+                rg_push_w(&mut t.u2.w, rw, &wout, m2);
             }
         }
         let d3 = unsafe { _rdtsc() };
         me.dc[4] += d3 - d2;
         for o in 0..nt {
             let src = p3(o);
-            { let mut tmp: Vec<*mut u8> = Vec::new(); src.es.release(p, &mut tmp); t.u2.s.free.extend(tmp.into_iter().map(|c| c as *mut u64)); }
-            { let mut tmp: Vec<*mut u8> = Vec::new(); src.ew.release(p, &mut tmp); t.u2.s.free.extend(tmp.into_iter().map(|c| c as *mut u64)); }
-            { let mut tmp: Vec<*mut u8> = Vec::new(); src.ex.release(p, &mut tmp); t.u2.s.free.extend(tmp.into_iter().map(|c| c as *mut u64)); }
+            src.es.release(p, &mut rel_tmp);
+            src.ew.release(p, &mut rel_tmp);
+            src.ex.release(p, &mut rel_tmp);
+        }
+        for c in rel_tmp.drain(..) {
+            if ext_kept(c as usize) {
+                continue;
+            }
+            if t.u2.w.free.len() < t.u2.s.free.len() {
+                t.u2.w.free.push(c as *mut u64);
+            } else {
+                t.u2.s.free.push(c as *mut u64);
+            }
         }
         me.dc[5] += unsafe { _rdtsc() } - d3;
         t.prof[2] += tick(&mut tk);
     }
     let d4 = unsafe { _rdtsc() };
     unsafe {
-        let vs = std::mem::size_of::<VStage>();
-        for q in 0..np2 {
-            if q + DLA < np2 {
-                dd_pf4((t.u2.s.st as *const i8).add((q + DLA) * vs));
-            }
-            let f = *rn.msf.add(q) as usize;
-            if f > 0 {
-                emit_run(t, b2, q, std::slice::from_raw_parts(rn.ms.add(q * MSW), f));
-                *rn.msf.add(q) = 0;
-            }
-        }
-        for q in 0..np2 {
-            if q + DLA < np2 {
-                dd_pf4((t.u2.w.st as *const i8).add((q + DLA) * vs));
-            }
-            let f = *rn.mwf.add(q) as usize;
-            if f > 0 {
-                emit_run_w(t, b2, q, std::slice::from_raw_parts(rn.mw.add(q * MWW), f));
-                *rn.mwf.add(q) = 0;
-            }
-        }
+        rg_fin(&mut t.u2.s, rs, np2);
+        rg_fin(&mut t.u2.w, rw, np2);
     }
     me.dc[6] += unsafe { _rdtsc() } - d4;
     t.n_rows[3] += kept;
@@ -4391,7 +4781,10 @@ unsafe fn pf_words(p: *const u64, n: usize) {
 }
 #[inline(never)]
 fn copy_slices(sl: &[(*const u64, usize)], out: &mut Vec<u64>) {
-    let tot: usize = sl.iter().map(|s| s.1).sum();
+    let mut tot = 0usize;
+    for s in sl.iter() {
+        tot = opq64((tot + s.1) as u64) as usize;
+    }
     out.reserve(tot);
     let pd = match unsafe { KN[0] & 15 } {
         0 => 2,
@@ -5093,6 +5486,23 @@ fn p1_thread(cx: &Cx, tid: usize) {
     if unsafe { KN[1] } == 0 {
         let n = g.ev_bytes / 72 / nt * ROWS_PM / 1000 + 1024;
         let r = &mut t.rows;
+        let e = ROWS_N.load(Ordering::Relaxed);
+        if e != 0 {
+            fn cc<T>(v: &mut Vec<T>, n: usize) {
+                let c = (n * std::mem::size_of::<T>()).next_power_of_two() / std::mem::size_of::<T>();
+                if c > v.len() {
+                    v.reserve_exact(c - v.len());
+                }
+            }
+            cc(&mut r.names.off, e);
+            cc(&mut r.names.data, e * 6);
+            cc(&mut r.ukeys, e);
+            cc(&mut r.day, e);
+            cc(&mut r.ses, e);
+            cc(&mut r.evs, e);
+            cc(&mut r.rev, e);
+            cc(&mut r.top, e);
+        } else {
         r.names.off.reserve(n);
         r.names.data.reserve(n * 6);
         r.ukeys.reserve(n);
@@ -5101,6 +5511,7 @@ fn p1_thread(cx: &Cx, tid: usize) {
         r.evs.reserve(n);
         r.rev.reserve(n);
         r.top.reserve(n);
+        }
     }
     loop {
         let q = cx.next.fetch_add(1, Ordering::Relaxed);
@@ -5642,6 +6053,7 @@ fn tie_camp<'a>(it: impl Iterator<Item = &'a [u64; 2]>, tsr: u64, cside: &[Key],
     best.unwrap().1
 }
 
+#[cfg(feature = "w512")]
 #[inline(never)]
 unsafe fn credit_mask<const NV: usize>(g: &G, odds: &[Vec<u8>], t: &mut T3, w: &mut Walk, cside: &[Key]) {
     use std::arch::x86_64::*;
@@ -5766,7 +6178,136 @@ unsafe fn credit_mask<const NV: usize>(g: &G, odds: &[Vec<u8>], t: &mut T3, w: &
     }
     w.asst.set_len(ap.offset_from(w.asst.as_ptr()) as usize);
 }
+#[cfg(not(feature = "w512"))]
+#[inline(never)]
+unsafe fn credit_mask<const NV: usize>(g: &G, odds: &[Vec<u8>], t: &mut T3, w: &mut Walk, cside: &[Key]) {
+    use std::arch::x86_64::*;
+    let ns = t.sess.len();
+    debug_assert!(ns >= 1 && ns <= 8 * NV);
+    let nd = g.nd as u32;
+    let day0 = g.day0;
+    let cbase = g.cbase;
+    let mut sr = [std::mem::MaybeUninit::<u32>::uninit(); 64];
+    let mut rm = [std::mem::MaybeUninit::<u64>::uninit(); 64];
+    let mut rd = [std::mem::MaybeUninit::<u32>::uninit(); 64];
+    let (srp, rmp, rdp) = (sr.as_mut_ptr() as *mut u32, rm.as_mut_ptr() as *mut u64, rd.as_mut_ptr() as *mut u32);
+    for v in 0..NV {
+        _mm256_storeu_si256(srp.add(8 * v) as *mut _, _mm256_set1_epi32(-1));
+    }
+    let sp = t.sess.as_ptr();
+    let nrows = (*sp.add(ns - 1)).row as usize + 1;
+    let ng = nrows.div_ceil(4);
+    for v in 0..ng {
+        _mm256_storeu_si256(rmp.add(4 * v) as *mut _, _mm256_setzero_si256());
+        _mm_storeu_si128(rdp.add(4 * v) as *mut _, _mm_setzero_si128());
+    }
+    let (mut f, mut pr) = (0usize, u32::MAX);
+    for s in 0..ns {
+        let x = &*sp.add(s);
+        *srp.add(s) = (x.start - cbase) as u32;
+        f = std::hint::select_unpredictable(x.row != pr, s, f);
+        pr = x.row;
+        *rmp.add(x.row as usize) = _bzhi_u64(!0, s as u32 + 1) & !_bzhi_u64(!0, f as u32);
+        *rdp.add(x.row as usize) = (x.day - day0) as u32;
+    }
+    let mut srv = [_mm256_setzero_si256(); NV];
+    for v in 0..NV {
+        srv[v] = _mm256_loadu_si256(srp.add(8 * v) as *const _);
+    }
+    t.serial += 1;
+    let ser = t.serial;
+    let stamp = t.stamp.as_mut_ptr();
+    let um = w.um.as_mut_ptr();
+    let n = w.cl.len();
+    w.ul.clear();
+    w.ul.reserve(n);
+    let ulp = w.ul.as_mut_ptr();
+    let mut k = 0usize;
+    let mut b1 = [_mm256_setzero_si256(); NV];
+    let mut b2 = [_mm256_setzero_si256(); NV];
+    let mut b1h = [_mm256_setzero_si256(); NV];
+    let mut b2h = [_mm256_setzero_si256(); NV];
+    let cp = w.cl.as_ptr();
+    for j in 0..n {
+        let c = *cp.add(j);
+        let ts = (c[0] as u32) >> 1;
+        let camp = (c[1] >> 42) as u32;
+        let (bl, bh) = (_mm256_set1_epi32(ts as i32), _mm256_set1_epi32((ts + WEEK_MS as u32) as i32));
+        let (mut a, mut b) = (0u32, 0u32);
+        for v in 0..NV {
+            a += (_mm256_cmplt_epu32_mask(srv[v], bl) as u32).count_ones();
+            b += (_mm256_cmple_epu32_mask(srv[v], bh) as u32).count_ones();
+        }
+        let r = _bzhi_u64(!0, b) & !_bzhi_u64(!0, a);
+        let fresh = *stamp.add(camp as usize) != ser;
+        let old = *um.add(camp as usize);
+        *um.add(camp as usize) = std::hint::select_unpredictable(fresh, 0, old) | r;
+        *stamp.add(camp as usize) = ser;
+        *ulp.add(k) = camp;
+        k += fresh as usize;
+        let hi = (ts as u64 + 1) << 32;
+        let (k1, k2) = (_mm256_set1_epi64x((hi | camp as u64) as i64), _mm256_set1_epi64x((hi | (!camp) as u64) as i64));
+        for v in 0..NV {
+            let m = (r >> (8 * v)) as u8;
+            b1[v] = _mm256_mask_max_epu64(b1[v], m, b1[v], k1);
+            b2[v] = _mm256_mask_max_epu64(b2[v], m, b2[v], k2);
+            b1h[v] = _mm256_mask_max_epu64(b1h[v], m >> 4, b1h[v], k1);
+            b2h[v] = _mm256_mask_max_epu64(b2h[v], m >> 4, b2h[v], k2);
+        }
+    }
+    w.ul.set_len(k);
+    let mut x1 = [std::mem::MaybeUninit::<u64>::uninit(); 64];
+    let mut x2 = [std::mem::MaybeUninit::<u64>::uninit(); 64];
+    let (x1, x2) = (x1.as_mut_ptr() as *mut u64, x2.as_mut_ptr() as *mut u64);
+    for v in 0..NV {
+        _mm256_storeu_si256(x1.add(8 * v) as *mut _, b1[v]);
+        _mm256_storeu_si256(x2.add(8 * v) as *mut _, b2[v]);
+        _mm256_storeu_si256(x1.add(8 * v + 4) as *mut _, b1h[v]);
+        _mm256_storeu_si256(x2.add(8 * v + 4) as *mut _, b2h[v]);
+    }
+    let organic = g.nc as u32;
+    w.ses.reserve(ns);
+    w.pur.reserve(ns);
+    let mut spp = w.ses.as_mut_ptr().add(w.ses.len());
+    let mut pp = w.pur.as_mut_ptr().add(w.pur.len());
+    for s in 0..ns {
+        let (y1, y2) = (*x1.add(s), *x2.add(s));
+        let mut camp = std::hint::select_unpredictable(y1 == 0, organic, y1 as u32);
+        if y1 as u32 != !(y2 as u32) && y1 != 0 {
+            t.st[11] += 1;
+            camp = tie_camp(w.cl.iter(), (y1 >> 32) - 1, cside, odds);
+        }
+        let x = &*sp.add(s);
+        let sl = camp * nd + (x.day - day0) as u32;
+        *spp = sl;
+        spp = spp.add(1);
+        *pp = [sl as u64, x.revenue()];
+        pp = pp.add(x.purch() as usize);
+    }
+    w.ses.set_len(spp.offset_from(w.ses.as_ptr()) as usize);
+    w.pur.set_len(pp.offset_from(w.pur.as_ptr()) as usize);
+    w.asst.reserve(k * 4 * ng + 8);
+    let mut ap = w.asst.as_mut_ptr().add(w.asst.len());
+    let lut = _mm256_broadcastsi128_si256(_mm_setr_epi8(0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4));
+    let m0f = _mm256_set1_epi8(0x0F);
+    for i in 0..k {
+        let c = *ulp.add(i);
+        let ub = _mm256_set1_epi64x(*um.add(c as usize) as i64);
+        let base = _mm_set1_epi32(c.wrapping_mul(nd) as i32);
+        for v in 0..ng {
+            let x = _mm256_and_si256(ub, _mm256_loadu_si256(rmp.add(4 * v) as *const _));
+            let pc = _mm256_add_epi8(_mm256_shuffle_epi8(lut, _mm256_and_si256(x, m0f)), _mm256_shuffle_epi8(lut, _mm256_and_si256(_mm256_srli_epi16::<4>(x), m0f)));
+            let cnt = _mm256_cvtepi64_epi32(_mm256_sad_epu8(pc, _mm256_setzero_si256()));
+            let ent = _mm_or_si128(_mm_slli_epi32::<8>(_mm_add_epi32(base, _mm_loadu_si128(rdp.add(4 * v) as *const _))), cnt);
+            let km = _mm_test_epi32_mask(cnt, cnt);
+            _mm_storeu_si128(ap as *mut _, _mm_maskz_compress_epi32(km, ent));
+            ap = ap.add(km.count_ones() as usize);
+        }
+    }
+    w.asst.set_len(ap.offset_from(w.asst.as_ptr()) as usize);
+}
 
+#[cfg(feature = "w512")]
 #[inline(always)]
 unsafe fn credit16(g: &G, odds: &[Vec<u8>], t: &mut T3, w: &mut Walk, cside: &[Key]) {
     use std::arch::x86_64::*;
@@ -5843,6 +6384,114 @@ unsafe fn credit16(g: &G, odds: &[Vec<u8>], t: &mut T3, w: &mut Walk, cside: &[K
     w.ses.set_len(sp.offset_from(w.ses.as_ptr()) as usize);
     w.pur.set_len(pp.offset_from(w.pur.as_ptr()) as usize);
 }
+#[cfg(not(feature = "w512"))]
+#[inline(always)]
+unsafe fn credit16<const H: usize>(g: &G, odds: &[Vec<u8>], t: &mut T3, w: &mut Walk, cside: &[Key]) {
+    use std::arch::x86_64::*;
+    let n = w.cl.len();
+    debug_assert!(n >= 1 && n <= 8 * H && H <= 2);
+    let nd = g.nd as u32;
+    let clp = w.cl.as_ptr() as *const i64;
+    let lm = _bzhi_u32(!0, 2 * n as u32);
+    let vm = _bzhi_u32(!0, n as u32);
+    let ie = _mm256_setr_epi64x(0, 2, 4, 6);
+    let io = _mm256_setr_epi64x(1, 3, 5, 7);
+    let m32 = _mm256_set1_epi64x(0xFFFF_FFFF);
+    let mx = _mm256_set1_epi64x(-1);
+    let ndv = _mm256_set1_epi32(nd as i32);
+    let lane = _mm256_setr_epi32(1, 2, 4, 8, 16, 32, 64, 128);
+    let z = _mm256_setzero_si256();
+    let mut kv = [z; 4];
+    let mut cv = [z; 2];
+    let mut cpv = [z; 2];
+    let mut slot = [z; 2];
+    for h in 0..H {
+        let (l, v) = (lm >> (16 * h), vm >> (8 * h));
+        let p = clp.add(16 * h);
+        let a0 = _mm256_maskz_loadu_epi64(l as u8, p as *const _);
+        let a1 = _mm256_maskz_loadu_epi64((l >> 4) as u8, p.add(4) as *const _);
+        let a2 = _mm256_maskz_loadu_epi64((l >> 8) as u8, p.add(8) as *const _);
+        let a3 = _mm256_maskz_loadu_epi64((l >> 12) as u8, p.add(12) as *const _);
+        let (lo0, lo1) = (_mm256_permutex2var_epi64(a0, ie, a1), _mm256_permutex2var_epi64(a2, ie, a3));
+        let (hi0, hi1) = (_mm256_srli_epi64::<42>(_mm256_permutex2var_epi64(a0, io, a1)), _mm256_srli_epi64::<42>(_mm256_permutex2var_epi64(a2, io, a3)));
+        kv[2 * h] = _mm256_mask_blend_epi64(v as u8, mx, _mm256_or_si256(_mm256_slli_epi64::<32>(_mm256_srli_epi64::<1>(_mm256_and_si256(lo0, m32))), hi0));
+        kv[2 * h + 1] = _mm256_mask_blend_epi64((v >> 4) as u8, mx, _mm256_or_si256(_mm256_slli_epi64::<32>(_mm256_srli_epi64::<1>(_mm256_and_si256(lo1, m32))), hi1));
+        let c = _mm256_inserti128_si256::<1>(_mm256_castsi128_si256(_mm256_cvtepi64_epi32(hi0)), opqx(_mm256_cvtepi64_epi32(hi1)));
+        cv[h] = c;
+        cpv[h] = _mm256_mask_blend_epi32(v as u8, _mm256_set1_epi32(-1), c);
+        let sl: __m256i;
+        std::arch::asm!("vpmulld {0}, {1}, {2}", out(ymm_reg) sl, in(ymm_reg) c, in(ymm_reg) ndv, options(pure, nomem, nostack, preserves_flags));
+        slot[h] = sl;
+    }
+    let conf0 = _mm256_conflict_epi32(cpv[0]);
+    let mut cmv = [_mm256_or_si256(conf0, lane), z];
+    let mut later = or8_epi32(conf0);
+    if H == 2 {
+        let conf1 = _mm256_conflict_epi32(cpv[1]);
+        let mut x = z;
+        for j in 0..8 {
+            let e = _mm256_cmpeq_epi32_mask(cpv[1], _mm256_permutevar8x32_epi32(cv[0], _mm256_set1_epi32(j)));
+            x = _mm256_mask_or_epi32(x, e, x, _mm256_set1_epi32(1 << j));
+        }
+        cmv[1] = _mm256_or_si256(_mm256_slli_epi32::<8>(_mm256_or_si256(conf1, lane)), x);
+        later |= or8_epi32(x) | or8_epi32(conf1) << 8;
+    }
+    let rep = !later & vm;
+    let day0 = g.day0;
+    let organic = g.nc as u32;
+    let cbase = g.cbase;
+    let week = (WEEK_MS as u64) << 32;
+    let one64 = _mm256_set1_epi64x(1);
+    let one32 = _mm256_set1_epi32(1);
+    let lim = _mm256_set1_epi64x(0xFFFF_FFFF);
+    let mut ap = w.asst.as_mut_ptr().add(w.asst.len());
+    let mut sp = w.ses.as_mut_ptr().add(w.ses.len());
+    let mut pp = w.pur.as_mut_ptr().add(w.pur.len());
+    let ns = t.sess.len();
+    for si in 0..ns {
+        let (start, day, purch, rev) = {
+            let s = t.sess.get_unchecked(si);
+            (s.start, s.day, s.purch(), s.revenue())
+        };
+        let dayoff = (day - day0) as u32;
+        let top = ((start - cbase) as u64) << 32 | 0xFFFF_FFFF;
+        let bot = (top - 0xFFFF_FFFF).saturating_sub(week);
+        let (bt, bb) = (_mm256_set1_epi64x(top as i64), _mm256_set1_epi64x(bot as i64));
+        let mut m = 0u32;
+        let mut vmax = z;
+        for q in 0..2 * H {
+            let mq = _mm256_cmple_epu64_mask(kv[q], bt) & _mm256_cmpge_epu64_mask(kv[q], bb);
+            vmax = _mm256_mask_max_epu64(vmax, mq, vmax, kv[q]);
+            m |= opq(mq as u32) << (4 * q);
+        }
+        let maxk = max4_epu64(vmax);
+        let mut camp = if m != 0 { maxk as u32 } else { organic };
+        let bmax = _mm256_set1_epi64x(maxk as i64);
+        let mut tie = 0u8;
+        for q in 0..2 * H {
+            tie |= _mm256_cmplt_epu64_mask(_mm256_sub_epi64(_mm256_xor_si256(kv[q], bmax), one64), lim);
+        }
+        if tie != 0 && m != 0 {
+            t.st[11] += 1;
+            camp = tie_camp(w.cl.iter(), maxk >> 32, cside, odds);
+        }
+        let (mv, dv) = (_mm256_set1_epi32(m as i32), _mm256_set1_epi32(dayoff as i32));
+        for h in 0..H {
+            let a = _mm256_test_epi32_mask(cmv[h], mv) & (rep >> (8 * h)) as u8;
+            let ent = _mm256_or_si256(_mm256_slli_epi32::<8>(_mm256_add_epi32(slot[h], dv)), one32);
+            _mm256_storeu_si256(ap as *mut _, _mm256_maskz_compress_epi32(a, ent));
+            ap = ap.add(a.count_ones() as usize);
+        }
+        let sl = camp * nd + dayoff;
+        *sp = sl;
+        sp = sp.add(1);
+        *pp = [sl as u64, rev];
+        pp = pp.add(purch as usize);
+    }
+    w.asst.set_len(ap.offset_from(w.asst.as_ptr()) as usize);
+    w.ses.set_len(sp.offset_from(w.ses.as_ptr()) as usize);
+    w.pur.set_len(pp.offset_from(w.pur.as_ptr()) as usize);
+}
 
 fn radix_ts(v: &mut Vec<u64>, tmp: &mut Vec<u64>) {
     let n = v.len();
@@ -5874,6 +6523,7 @@ fn radix_ts(v: &mut Vec<u64>, tmp: &mut Vec<u64>) {
     }
 }
 
+#[cfg(feature = "w512")]
 #[inline(never)]
 fn credit_sorted(g: &G, odds: &[Vec<u8>], t: &mut T3, w: &mut Walk, cside: &[Key]) {
     use std::arch::x86_64::*;
@@ -6155,6 +6805,293 @@ fn credit_sorted(g: &G, odds: &[Vec<u8>], t: &mut T3, w: &mut Walk, cside: &[Key
         pkpm::lap(&mut cpl, 13);
     }
 }
+#[cfg(not(feature = "w512"))]
+#[inline(never)]
+fn credit_sorted(g: &G, odds: &[Vec<u8>], t: &mut T3, w: &mut Walk, cside: &[Key]) {
+    use std::arch::x86_64::*;
+    let mut cpl = [0u64; 3];
+    let n = w.cl.len();
+    let nd = g.nd as u32;
+    let day0 = g.day0;
+    let organic = g.nc as u32;
+    let cbase = g.cbase;
+    let week = (WEEK_MS as u64) << 32;
+    let ns = t.sess.len();
+    w.sk.clear();
+    if n <= 64 {
+        unsafe {
+            let nv = n.div_ceil(4);
+            let mut k = [u64::MAX; 64];
+            let mut ki = [u64::MAX; 64];
+            for (j, c) in w.cl.iter().enumerate() {
+                let ts = opq64((c[0] as u32 >> 1) as u64);
+                *k.get_unchecked_mut(j) = ts << 32 | c[1] >> 42;
+                *ki.get_unchecked_mut(j) = ts << 32 | j as u64;
+            }
+            let one64 = _mm256_set1_epi64x(1);
+            let lim = _mm256_set1_epi64x(0xFFFF_FFFF);
+            let mut sp = w.ses.as_mut_ptr().add(w.ses.len());
+            let mut pp = w.pur.as_mut_ptr().add(w.pur.len());
+            for si in 0..ns {
+                let (start, day, purch, rev) = {
+                    let s = t.sess.get_unchecked(si);
+                    (s.start, s.day, s.purch(), s.revenue())
+                };
+                let top = ((start - cbase) as u64) << 32 | 0xFFFF_FFFF;
+                let bot = (top - 0xFFFF_FFFF).saturating_sub(week);
+                let (bt, bb) = (_mm256_set1_epi64x(top as i64), _mm256_set1_epi64x(bot as i64));
+                let mut m = 0u8;
+                let mut vmax = _mm256_setzero_si256();
+                for v in 0..nv {
+                    let kv = _mm256_loadu_si256(k.as_ptr().add(4 * v) as *const _);
+                    let m8 = _mm256_cmple_epu64_mask(kv, bt) & _mm256_cmpge_epu64_mask(kv, bb);
+                    m |= m8;
+                    vmax = _mm256_mask_max_epu64(vmax, m8, vmax, kv);
+                }
+                let maxk = max4_epu64(vmax);
+                let mut camp = if m != 0 { maxk as u32 } else { organic };
+                let bmax = _mm256_set1_epi64x(maxk as i64);
+                let mut tie = 0u8;
+                for v in 0..nv {
+                    let kv = _mm256_loadu_si256(k.as_ptr().add(4 * v) as *const _);
+                    tie |= _mm256_cmplt_epu64_mask(_mm256_sub_epi64(_mm256_xor_si256(kv, bmax), one64), lim);
+                }
+                if tie != 0 && m != 0 {
+                    t.st[11] += 1;
+                    camp = tie_camp(w.cl.iter(), maxk >> 32, cside, odds);
+                }
+                let sl = camp * nd + (day - day0) as u32;
+                *sp = sl;
+                sp = sp.add(1);
+                *pp = [sl as u64, rev];
+                pp = pp.add(purch as usize);
+            }
+            w.ses.set_len(sp.offset_from(w.ses.as_ptr()) as usize);
+            w.pur.set_len(pp.offset_from(w.pur.as_ptr()) as usize);
+            w.sk.reserve(n);
+            let d = w.sk.as_mut_ptr();
+            for j in 0..n {
+                let b = _mm256_set1_epi64x(*ki.get_unchecked(j) as i64);
+                let mut r = 0u32;
+                for v in 0..nv {
+                    r += (_mm256_cmplt_epu64_mask(_mm256_loadu_si256(ki.as_ptr().add(4 * v) as *const _), b) as u32).count_ones();
+                }
+                *d.add(r as usize) = *k.get_unchecked(j);
+            }
+            w.sk.set_len(n);
+        }
+    } else {
+        if pkpm::on() {
+            cpl = pkpm::rd();
+        }
+        w.sidx.clear();
+        if n < 1 << 19 {
+            w.sk.extend(w.cl.iter().enumerate().map(|(i, c)| opq64((c[0] as u32 >> 1) as u64) << 33 | (c[1] >> 42) << 19 | i as u64));
+            if n >= unsafe { KN[3] } {
+                radix_ts(&mut w.sk, &mut w.sk2);
+            } else {
+                w.sk.sort_unstable();
+            }
+            for p in w.sk.iter_mut() {
+                w.sidx.push((*p & 0x7_FFFF) as u32);
+                *p = (*p >> 33) << 32 | ((*p >> 19) & 0x3FFF);
+            }
+        } else {
+            if n >= u32::MAX as usize {
+                fallback("a person with 2^32 clicks");
+            }
+            let mut v: Vec<(u64, u32)> = w.cl.iter().enumerate().map(|(i, c)| (opq64((c[0] as u32 >> 1) as u64) << 32 | c[1] >> 42, i as u32)).collect();
+            v.sort_unstable();
+            for (k, i) in v {
+                w.sk.push(k);
+                w.sidx.push(i);
+            }
+        }
+        if pkpm::on() {
+            pkpm::lap(&mut cpl, 11);
+        }
+        w.sk.push(u64::MAX);
+        let sk = &w.sk;
+        let skp = sk.as_ptr();
+        let (mut lo, mut hi) = (0usize, 0usize);
+        w.ses.reserve(ns);
+        w.pur.reserve(ns);
+        let mut spp = unsafe { w.ses.as_mut_ptr().add(w.ses.len()) };
+        let mut pp = unsafe { w.pur.as_mut_ptr().add(w.pur.len()) };
+        for si in 0..ns {
+            let (start, day, purch, rev) = {
+                let s = &t.sess[si];
+                (s.start, s.day, s.purch(), s.revenue())
+            };
+            let top = ((start - cbase) as u64) << 32 | 0xFFFF_FFFF;
+            let bot = (top - 0xFFFF_FFFF).saturating_sub(week);
+            unsafe {
+                hi += (*skp.add(hi) <= top) as usize;
+                hi += (*skp.add(hi) <= top) as usize;
+                while *skp.add(hi) <= top {
+                    hi += 1;
+                }
+                lo += (*skp.add(lo) < bot) as usize;
+                lo += (*skp.add(lo) < bot) as usize;
+                while *skp.add(lo) < bot {
+                    lo += 1;
+                }
+            }
+            let last = unsafe { *skp.add(hi.saturating_sub(1)) };
+            let mut camp = std::hint::select_unpredictable(hi > lo, last as u32, organic);
+            if hi >= lo + 2 && sk[hi - 2] >> 32 == last >> 32 {
+                let mut f = hi - 1;
+                let mut tie = false;
+                while f > lo && sk[f - 1] >> 32 == last >> 32 {
+                    f -= 1;
+                    tie |= sk[f] != last;
+                }
+                if tie {
+                    t.st[11] += 1;
+                    camp = tie_camp(w.sidx[f..hi].iter().map(|&i| &w.cl[i as usize]), last >> 32, cside, odds);
+                }
+            }
+            let sl = camp * nd + (day - day0) as u32;
+            unsafe {
+                *spp = sl;
+                spp = spp.add(1);
+                *pp = [sl as u64, rev];
+                pp = pp.add(purch as usize);
+            }
+        }
+        unsafe {
+            w.ses.set_len(spp.offset_from(w.ses.as_ptr()) as usize);
+            w.pur.set_len(pp.offset_from(w.pur.as_ptr()) as usize);
+        }
+        w.sk.pop();
+    }
+    if pkpm::on() && n > 64 {
+        pkpm::lap(&mut cpl, 12);
+    }
+    let sk = &w.sk;
+    let ndu = g.nd;
+    t.serial += 1;
+    let ser = t.serial;
+    let asst = t.acc.asst.as_mut_ptr();
+    w.sr.clear();
+    w.sr.extend(t.sess.iter().map(|s| opq((s.start - cbase) as u32)));
+    w.sr.resize((ns + 1).next_multiple_of(16), u32::MAX);
+    let sr = w.sr.as_ptr();
+    if ndu <= 16 {
+        let mut s0a = [0u32; 16];
+        let mut s1a = [0u32; 16];
+        let mut s0 = 0usize;
+        for si in 0..ns {
+            let day = t.sess[si].day;
+            if si + 1 == ns || t.sess[si + 1].day != day {
+                s0a[(day - day0) as usize] = s0 as u32;
+                s1a[(day - day0) as usize] = si as u32 + 1;
+                s0 = si + 1;
+            }
+        }
+        unsafe {
+            let (s0v, s0h) = (_mm256_loadu_si256(s0a.as_ptr() as *const _), _mm256_loadu_si256(s0a.as_ptr().add(8) as *const _));
+            let (s1v, s1h) = (_mm256_loadu_si256(s1a.as_ptr() as *const _), _mm256_loadu_si256(s1a.as_ptr().add(8) as *const _));
+            let km = ((1u32 << ndu) - 1) as u16;
+            let (kml, kmh) = (km as u8, (km >> 8) as u8);
+            let z = _mm256_setzero_si256();
+            let stamp = t.stamp.as_mut_ptr();
+            let lidx = w.lidx.as_mut_ptr();
+            let nsv = ns.div_ceil(8);
+            let (mut pa, mut pb) = (0usize, 0usize);
+            for &k in sk.iter() {
+                let ts = (k >> 32) as u32;
+                let (a, b);
+                if nsv <= 8 {
+                    let (bl, bh) = (_mm256_set1_epi32(ts as i32), _mm256_set1_epi32((ts + WEEK_MS as u32) as i32));
+                    let (mut ca, mut cb) = (0u32, 0u32);
+                    for v in 0..nsv {
+                        let sv = _mm256_loadu_si256(sr.add(8 * v) as *const _);
+                        ca += (_mm256_cmplt_epu32_mask(sv, bl) as u32).count_ones();
+                        cb += (_mm256_cmple_epu32_mask(sv, bh) as u32).count_ones();
+                    }
+                    a = ca as usize;
+                    b = cb as usize;
+                } else {
+                    let tw = ts + WEEK_MS as u32;
+                    pa += (*sr.add(pa) < ts) as usize;
+                    while *sr.add(pa) < ts {
+                        pa += 1;
+                    }
+                    pb += (*sr.add(pb) <= tw) as usize;
+                    pb += (*sr.add(pb) <= tw) as usize;
+                    while *sr.add(pb) <= tw {
+                        pb += 1;
+                    }
+                    a = pa;
+                    b = pb;
+                }
+                let c = k as u32 as usize;
+                let covered = *lidx.add(c) as usize;
+                let x = if *stamp.add(c) == ser { a.max(covered) } else { a };
+                *stamp.add(c) = ser;
+                *lidx.add(c) = b as u32;
+                let (bv, xv) = (_mm256_set1_epi32(b as i32), _mm256_set1_epi32(x as i32));
+                let cnt = _mm256_max_epi32(z, _mm256_sub_epi32(_mm256_min_epi32(bv, s1v), _mm256_max_epi32(xv, s0v)));
+                let cnth = _mm256_max_epi32(z, _mm256_sub_epi32(_mm256_min_epi32(bv, s1h), _mm256_max_epi32(xv, s0h)));
+                let p = asst.add(c * ndu) as *mut i32;
+                _mm256_mask_storeu_epi32(p, kml, _mm256_add_epi32(_mm256_maskz_loadu_epi32(kml, p), cnt));
+                _mm256_mask_storeu_epi32(p.add(8), kmh, _mm256_add_epi32(_mm256_maskz_loadu_epi32(kmh, p.add(8)), cnth));
+            }
+        }
+    } else {
+        w.rs.clear();
+        w.rowof.clear();
+        let mut s0 = 0usize;
+        for si in 0..ns {
+            let day = t.sess[si].day;
+            w.rowof.push(w.rs.len() as u32);
+            if si + 1 == ns || t.sess[si + 1].day != day {
+                w.rs.push((s0 as u32, si as u32 + 1, (day - day0) as u32));
+                s0 = si + 1;
+            }
+        }
+        let (mut a, mut b) = (0usize, 0usize);
+        for &k in sk.iter() {
+            let ts = (k >> 32) as u32;
+            unsafe {
+                while a < ns && *sr.add(a) < ts {
+                    a += 1;
+                }
+                while b < ns && *sr.add(b) <= ts + WEEK_MS as u32 {
+                    b += 1;
+                }
+            }
+            if a >= b {
+                continue;
+            }
+            let c = k as u32 as usize;
+            let mut x = a;
+            if t.stamp[c] == ser {
+                x = x.max(w.lidx[c] as usize);
+            } else {
+                t.stamp[c] = ser;
+            }
+            w.lidx[c] = b as u32;
+            if x >= b {
+                continue;
+            }
+            let mut r = w.rowof[x] as usize;
+            loop {
+                let (r0, r1, dayoff) = w.rs[r];
+                let cnt = (b.min(r1 as usize) - x.max(r0 as usize)) as u32;
+                unsafe { *asst.add(c * ndu + dayoff as usize) += cnt };
+                if r1 as usize >= b {
+                    break;
+                }
+                r += 1;
+            }
+        }
+    }
+    if pkpm::on() && n > 64 {
+        pkpm::lap(&mut cpl, 13);
+    }
+}
 
 #[inline(always)]
 fn flush_row(t: &mut T3, day: i32, sessions: u64, events: u64) {
@@ -6287,7 +7224,7 @@ unsafe fn scan_bins(op: *mut u8, bp: *mut Bin, nw: usize, sm: u64, sp: *mut Sess
     macro_rules! word {
         ($wi:expr) => {{
             let p = op.add($wi * 64);
-            let m = (_mm256_movemask_epi8(_mm256_loadu_si256(p as *const _)) as u32 as u64) | (_mm256_movemask_epi8(_mm256_loadu_si256(p.add(32) as *const _)) as u32 as u64) << 32;
+            let m = (_mm256_movemask_epi8(_mm256_loadu_si256(p as *const _)) as u32 as u64) | opq64(_mm256_movemask_epi8(_mm256_loadu_si256(p.add(32) as *const _)) as u32 as u64) << 32;
             _mm256_storeu_si256(p as *mut _, z);
             _mm256_storeu_si256(p.add(32) as *mut _, z);
             m
@@ -6395,6 +7332,7 @@ fn finish_person(g: &G, odds: &[Vec<u8>], t: &mut T3, w: &mut Walk, cside: &[Key
     unsafe { expand_rows(t, row0) };
 }
 
+#[cfg(feature = "w512")]
 #[inline(always)]
 unsafe fn expand_rows(t: &mut T3, row0: usize) {
     let r = &mut t.rows;
@@ -6425,6 +7363,48 @@ unsafe fn expand_rows(t: &mut T3, row0: usize) {
     } else {
         for k in 0..nr {
             let [ds, ev] = *rp.add(k);
+            *pu.add(k) = name_ix;
+            *pd.add(k) = ds as i32;
+            *pse.add(k) = (ds >> 32) as i64;
+            *pev.add(k) = ev as i64;
+            *pr.add(k) = *vp.add(k) as i64;
+            *pt.add(k) = *tq.add(k);
+        }
+    }
+}
+#[cfg(not(feature = "w512"))]
+#[inline(always)]
+unsafe fn expand_rows(t: &mut T3, row0: usize) {
+    let r = &mut t.rows;
+    let nr = r.day.len() - row0;
+    let name_ix = (r.names.off.len() - 2) as u32;
+    let (rp, vp, tq) = (t.sb.rw.as_ptr(), t.sb.rv.as_ptr(), t.sb.tp.as_ptr());
+    let (pu, pd, pse, pev, pr, pt) = (r.ukeys.as_mut_ptr().add(row0), r.day.as_mut_ptr().add(row0), r.ses.as_mut_ptr().add(row0), r.evs.as_mut_ptr().add(row0), r.rev.as_mut_ptr().add(row0), r.top.as_mut_ptr().add(row0));
+    if nr <= 16 {
+        use std::arch::x86_64::*;
+        let km = _bzhi_u32(!0, nr as u32);
+        let rq = rp as *const __m256i;
+        let ie = _mm256_setr_epi64x(0, 2, 4, 6);
+        let io = _mm256_setr_epi64x(1, 3, 5, 7);
+        let nv = _mm_set1_epi32(name_ix as i32);
+        let mut q = 0usize;
+        while 4 * q < nr {
+            let k = (km >> (4 * q)) as u8 & 15;
+            let (p0, p1) = (_mm256_loadu_si256(rq.add(2 * q)), opqv(_mm256_loadu_si256(rq.add(2 * q + 1))));
+            let ds = _mm256_permutex2var_epi64(p0, ie, p1);
+            let ev = _mm256_permutex2var_epi64(p0, io, p1);
+            _mm256_mask_storeu_epi64(pse.add(4 * q) as *mut _, k, _mm256_srli_epi64::<32>(ds));
+            _mm256_mask_storeu_epi64(pev.add(4 * q) as *mut _, k, ev);
+            _mm256_mask_storeu_epi64(pr.add(4 * q) as *mut _, k, _mm256_loadu_si256(vp.add(4 * q) as *const _));
+            _mm_mask_storeu_epi32(pd.add(4 * q) as *mut _, k, _mm256_cvtepi64_epi32(ds));
+            _mm_mask_storeu_epi32(pu.add(4 * q) as *mut _, k, nv);
+            q += 1;
+        }
+        _mm_mask_storeu_epi8(pt as *mut _, km as u16, _mm_loadu_si128(tq as *const _));
+    } else {
+        for k in 0..nr {
+            let [ds, ev] = *rp.add(k);
+            let ds = opq64(ds);
             *pu.add(k) = name_ix;
             *pd.add(k) = ds as i32;
             *pse.add(k) = (ds >> 32) as i64;
@@ -6515,8 +7495,19 @@ fn walk_person(g: &G, odds: &[Vec<u8>], t: &mut T3, w: &mut Walk, cside: &[Key],
         {
             use std::arch::x86_64::*;
             let (vp, tq) = (sb.rv.as_mut_ptr(), sb.tp.as_mut_ptr());
-            _mm512_storeu_si512(vp as *mut _, _mm512_setzero_si512());
-            _mm512_storeu_si512(vp.add(8) as *mut _, _mm512_setzero_si512());
+            #[cfg(feature = "w512")]
+            {
+                _mm512_storeu_si512(vp as *mut _, _mm512_setzero_si512());
+                _mm512_storeu_si512(vp.add(8) as *mut _, _mm512_setzero_si512());
+            }
+            #[cfg(not(feature = "w512"))]
+            {
+                let z = _mm256_setzero_si256();
+                _mm256_storeu_si256(vp as *mut _, z);
+                _mm256_storeu_si256(vp.add(4) as *mut _, z);
+                _mm256_storeu_si256(vp.add(8) as *mut _, z);
+                _mm256_storeu_si256(vp.add(12) as *mut _, z);
+            }
             _mm_storeu_si128(tq as *mut _, _mm_set1_epi8(-1));
             for k in 16..nr {
                 *vp.add(k) = 0;
@@ -6574,9 +7565,28 @@ fn walk_person(g: &G, odds: &[Vec<u8>], t: &mut T3, w: &mut Walk, cside: &[Key],
                 unsafe {
                     use std::arch::x86_64::*;
                     let p = sb.cs.as_ptr().add(r * 32);
-                    let v: [__m512i; 4] = [_mm512_loadu_si512(p as *const _), _mm512_loadu_si512(p.add(8) as *const _), _mm512_loadu_si512(p.add(16) as *const _), _mm512_loadu_si512(p.add(24) as *const _)];
-                    let best = _mm512_set1_epi64(_mm512_reduce_max_epu64(_mm512_max_epu64(_mm512_max_epu64(v[0], v[1]), _mm512_max_epu64(v[2], v[3]))) as i64);
-                    let m = _mm512_cmpeq_epu64_mask(v[0], best) as u32 | (_mm512_cmpeq_epu64_mask(v[1], best) as u32) << 8 | (_mm512_cmpeq_epu64_mask(v[2], best) as u32) << 16 | (_mm512_cmpeq_epu64_mask(v[3], best) as u32) << 24;
+                    #[cfg(feature = "w512")]
+                    let m = {
+                        let v: [__m512i; 4] = [_mm512_loadu_si512(p as *const _), _mm512_loadu_si512(p.add(8) as *const _), _mm512_loadu_si512(p.add(16) as *const _), _mm512_loadu_si512(p.add(24) as *const _)];
+                        let best = _mm512_set1_epi64(_mm512_reduce_max_epu64(_mm512_max_epu64(_mm512_max_epu64(v[0], v[1]), _mm512_max_epu64(v[2], v[3]))) as i64);
+                        let m = _mm512_cmpeq_epu64_mask(v[0], best) as u32 | (_mm512_cmpeq_epu64_mask(v[1], best) as u32) << 8 | (_mm512_cmpeq_epu64_mask(v[2], best) as u32) << 16 | (_mm512_cmpeq_epu64_mask(v[3], best) as u32) << 24;
+                        m
+                    };
+                    #[cfg(not(feature = "w512"))]
+                    let m = {
+                        let mut v = [_mm256_setzero_si256(); 8];
+                        let mut mx = _mm256_setzero_si256();
+                        for q in 0..8 {
+                            v[q] = _mm256_loadu_si256(p.add(4 * q) as *const _);
+                            mx = _mm256_max_epu64(mx, v[q]);
+                        }
+                        let best = _mm256_set1_epi64x(max4_epu64(mx) as i64);
+                        let mut m = 0u32;
+                        for q in 0..8 {
+                            m |= opq(_mm256_cmpeq_epu64_mask(v[q], best) as u32) << (4 * q);
+                        }
+                        m
+                    };
                     sb.tp[r] = m.trailing_zeros() as u8;
                 }
             }
@@ -6645,7 +7655,18 @@ fn walk_person(g: &G, odds: &[Vec<u8>], t: &mut T3, w: &mut Walk, cside: &[Key],
             pkpm::lap(&mut pl, if n <= 16 { 9 } else if n <= 64 { 5 } else { 10 });
         }
     } else if n <= 16 {
-        unsafe { credit16(g, odds, t, w, cside) };
+        #[cfg(feature = "w512")]
+        unsafe {
+            credit16(g, odds, t, w, cside)
+        };
+        #[cfg(not(feature = "w512"))]
+        unsafe {
+            if n <= 8 {
+                credit16::<1>(g, odds, t, w, cside)
+            } else {
+                credit16::<2>(g, odds, t, w, cside)
+            }
+        };
         t.st[6] += pf_now() - c3;
         if pm {
             pkpm::lap(&mut pl, 4);
@@ -6794,9 +7815,6 @@ pub fn run(g: &G, outdir: &str, timing: bool) {
     };
     unsafe { SKIP = std::env::var("XL_V3SKIP").ok().and_then(|v| v.parse().ok()).unwrap_or(0) };
     unsafe { PF = std::env::var("XL_PF").is_ok() };
-    if let Some(v) = std::env::var("XL_EAB").ok().and_then(|v| v.parse::<usize>().ok()) {
-        unsafe { EAB = (v.clamp(2, 1024) << 20) & !(BLOCK - 1) };
-    }
     unsafe { pm3::ON = std::env::var("XL_PM").is_ok() };
     for k in 0..8 {
         if let Some(v) = std::env::var(format!("XL_PB{k}")).ok().and_then(|v| v.parse().ok()) {
@@ -6850,7 +7868,10 @@ pub fn run(g: &G, outdir: &str, timing: bool) {
 
     let mut ts = Vec::with_capacity(nt);
     let pmr = pm_on("XL_PMR");
-    let rcap = if pmr { rows_est / nt + 4096 } else { 0 };
+    let ekeep = knob("XL_EKEEP", 250).min(1000);
+    unsafe { EXT_BASE = crate::sys::a_base() & !(EXT_SZ - 1) };
+    EXT_ON.store(ekeep > 0 && ck_late() && crate::sys::a_base() != 0, Ordering::Relaxed);
+    let rcap = if pmr && !EXT_ON.load(Ordering::Relaxed) { rows_est / nt + 4096 } else { 0 };
     let lk_bytes: usize = g.files.iter().filter(|f| f.kind == Kind::Lk).map(|f| f.len).sum();
     let lcap = if pmr && lk_bytes > 0 { lk_bytes / 16 + 16 } else { 0 };
     for _ in 0..nt {
@@ -6912,6 +7933,7 @@ pub fn run(g: &G, outdir: &str, timing: bool) {
     run_par(nt, |tid| parse_thread(&cx, tid));
     unsafe { *cx.odds.get() = std::mem::take(&mut cx.odd.lock().unwrap_or_else(|e| e.into_inner()).strs) };
     lap("parse");
+    ext_decide(ekeep);
     let mut cen = String::new();
     let vbc = |v: &VB| -> (usize, usize) {
         let (mut c, mut w) = (0, 0);
@@ -6978,6 +8000,20 @@ pub fn run(g: &G, outdir: &str, timing: bool) {
     }
     links_join(&cx);
     lap("links");
+    if EXT_ON.load(Ordering::Relaxed) {
+        let kept: u64 = (0..nt).map(|t| cx.t(t).n_rows[3]).sum();
+        ROWS_N.store(kept as usize * knob("XL_ERN", 140) / 1000 / nt + 4096, Ordering::Relaxed);
+        if knob("XL_EKCHK", 0) == 1 {
+            ext_check(&cx);
+        }
+        if knob("XL_EKPOISON", 0) == 1 {
+            ext_poison();
+        }
+        let d = ext_donate();
+        if timing {
+            cen.push_str(&format!("e2we: extents={} kept={} donated_MB={} rows_cap={}\n", EXT_N.load(Ordering::Relaxed), unsafe { EXT_NK }, d >> 20, ROWS_N.load(Ordering::Relaxed)));
+        }
+    }
     if pm_on("XL_PMH") {
         let mut all: Vec<*mut u64> = Vec::new();
         for tid in 0..nt {
