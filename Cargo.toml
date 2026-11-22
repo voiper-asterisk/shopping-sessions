@@ -1,9 +1,7 @@
 [package]
-name = "shopping-sessions-pipeline"
-version = "0.2.0"
+name = "pipeline"
+version = "0.1.0"
 edition = "2021"
-authors = ["voiper-asterisk"]
-description = "High-performance vectorized shopping sessions pipeline for Builders Buildathon 2026"
 publish = false
 
 [[bin]]

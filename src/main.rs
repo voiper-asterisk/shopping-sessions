@@ -1,7 +1,3 @@
-//! Shopping Sessions Engine — Team voiper-asterisk
-//! High-performance pipeline for the Databricks Shopping Sessions track (Builders Buildathon 2026).
-//! Features lock-free union-find identity graph, SIMD CSV tokenization, and zero-allocation sessionization.
-
 #![allow(dead_code, static_mut_refs, unused_unsafe, unexpected_cfgs)]
 mod ckix;
 mod complex;
@@ -602,7 +598,7 @@ fn main() {
         }
     }
     sys::xm(62);
-    if !endrel_ran && std::env::var("XL_XREL").is_ok_and(|v| v == "1") {
+    if !endrel_ran && std::env::var("XL_XREL").map_or(true, |v| v != "0") {
         sys::exit_release(g.nt, unsafe { &parse::FDS });
     }
     sys::xm_end();
