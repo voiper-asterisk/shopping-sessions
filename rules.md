@@ -98,7 +98,7 @@ A quick self-check: summed over all rows, `sessions` and `revenue_cents` are equ
 
 ## The generator
 
-`generate --seed N --events E --clicks C --output DIR` writes every input file above. The whale users, whale campaigns, window and dirt rates all change with the seed, so nothing about a dataset can be hard-coded.
+`generate --seed N --events E --clicks C --output DIR` writes every input file above. The whale users, whale campaigns, window, ID keys and dirt rates all change with the seed, so nothing about a dataset can be hard-coded. One in eight distinct `user_id`, `event_id` and `click_id` values carries a 32-character hexadecimal suffix (the rest use short lowercase base 36), and every ID passes through a per-seed keyed bijection, so pipelines must treat IDs as opaque variable-width strings rather than fixed-width or invertible generator numbers.
 
 The clean data:
 

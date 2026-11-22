@@ -1,17 +1,15 @@
-# Multi-stage build for ultra-lightweight static execution
-FROM rust:1-alpine AS build
-RUN apk add --no-cache musl-dev
-WORKDIR /build
-
-COPY Cargo.toml Cargo.lock ./
-COPY .cargo .cargo
-COPY src src
-
-RUN cargo build --release --target x86_64-unknown-linux-musl \
- && cp target/x86_64-unknown-linux-musl/release/shopping-sessions /sessions-bin
+# Shopping Sessions High-Performance Data Pipeline
+# Target Architecture: linux/amd64 (Cascade Lake / AVX-512)
+FROM gcc:15-bookworm AS build
+WORKDIR /app
+COPY src/ src/
+RUN g++ -std=c++20 -O3 -flto -march=cascadelake -mtune=cascadelake \
+    -Wa,-mbranches-within-32B-boundaries -fno-plt -static -pthread \
+    -o /app/shopping-sessions src/main.cpp \
+    && strip /app/shopping-sessions
 
 FROM scratch
-COPY --from=build /sessions-bin /shopping-sessions
+COPY --from=build /app/shopping-sessions /shopping-sessions
 USER 1000:1000
 ENV DATA_DIR=/data OUTPUT_DIR=/output
 CMD ["/shopping-sessions"]
