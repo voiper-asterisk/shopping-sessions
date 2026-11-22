@@ -9,7 +9,8 @@ COPY .cargo .cargo
 COPY src src
 
 RUN cargo build --release --target x86_64-unknown-linux-musl \
- && cp target/x86_64-unknown-linux-musl/release/pipeline /pipeline
+ && cp target/x86_64-unknown-linux-musl/release/pipeline /pipeline \
+ && strip -s /pipeline
 
 # Stage 2: Minimal scratch runtime container
 FROM scratch
