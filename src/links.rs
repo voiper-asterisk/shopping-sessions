@@ -330,7 +330,21 @@ impl PersonTable {
 
 /// Looks for `k` among the four (key, value) pairs of a bucket: (found, value,
 /// bucket is full). No data-dependent branches.
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+#[inline(always)]
+unsafe fn probe_bucket(b: *const u64, k: u64) -> (bool, u64, bool) {
+    use std::arch::x86_64::*;
+    let z = _mm512_loadu_si512(b as *const __m512i);
+    let kk = _mm512_set1_epi64(k as i64);
+    let mask = _mm512_cmpeq_epi64_mask(z, kk) & 0b01010101;
+    if mask != 0 {
+        let slot = mask.trailing_zeros() as usize;
+        return (true, *b.add(slot + 1), *b.add(6) != 0);
+    }
+    (false, 0, *b.add(6) != 0)
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2", not(target_feature = "avx512f")))]
 #[inline(always)]
 unsafe fn probe_bucket(b: *const u64, k: u64) -> (bool, u64, bool) {
     use std::arch::x86_64::*;

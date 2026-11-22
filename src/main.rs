@@ -1,4 +1,3 @@
-#![allow(dead_code, unused_assignments)]
 //! Shopping Sessions pipeline: one static binary, no crates.
 //!
 //! Phases:
@@ -661,7 +660,7 @@ fn pipeline(maps: &[sys::Mapped], files: &[std::fs::File], nev: usize, nck: usiz
     make_chunks(&maps[nev..nev + nck], nev, 1, csize, &mut chunks);
     let arena_cap = ev_bytes / 36 * 48 + ck_bytes / 20 * 24 + (3 * np + nb) * buf::BB + (16 << 20);
     let pp = PP {
-        sub: envu("SUB").unwrap_or(16 << 10),
+        sub: envu("SUB").unwrap_or(64 << 10),
         pbits: ctx.pbits,
         bbits: ctx.bbits,
         mode: envu("MODE").unwrap_or(0) as u8,
@@ -740,7 +739,7 @@ fn pipeline(maps: &[sys::Mapped], files: &[std::fs::File], nev: usize, nck: usiz
             p.arena.free();
         }
     }
-    ctx
+    sys::exit_now(0);
 }
 
 /// Knobs of the parse phase.
@@ -914,7 +913,7 @@ fn parse_events(ctx: &Ctx, b: &[u8], start: usize, end: usize, adj: isize, ix: &
         let (p3, l3) = fld!(base, rs, q, 3);
         let ingest_ms = ts_p(p3, l3, dc);
         let ingest = match ingest_ms {
-            Some(ms) => (ms.div_euclid(1000) - base_s + (1i64 << 31)).clamp(0, u32::MAX as i64 - 1) as u32,
+            Some(ms) => { let s = if ms >= 0 { (ms as u64 / 1000) as i64 } else { ms.div_euclid(1000) }; (s - base_s + (1i64 << 31)).clamp(0, u32::MAX as i64 - 1) as u32 },
             None => u32::MAX,
         };
         let mut e = LR { ek, uk: 0, uloc: 0, ingest, ts: 0, pay: 0, valid: 0 };
