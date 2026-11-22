@@ -1872,7 +1872,8 @@ unsafe fn set_big(d: *mut u8, b: u8, n: usize) {
     #[cfg(not(feature = "w512"))]
     {
         use std::arch::x86_64::*;
-        let v = _mm256_set1_epi8(b as i8);
+        let u = 0x0101_0101_0101_0101u64 * b as u64;
+        let v = _mm256_set1_epi64x(u as i64);
         if n >= NT_MIN {
             std::arch::asm!(
                 "vmovdqu ymmword ptr [{d}], {v}",
@@ -1967,7 +1968,8 @@ pub unsafe extern "C" fn memset(d: *mut std::ffi::c_void, c: i32, n: usize) -> *
             *d = b;
         }
     } else if n <= 128 {
-        let v = _mm256_set1_epi8(b as i8);
+        let u = 0x0101_0101_0101_0101u64 * b as u64;
+        let v = _mm256_set1_epi64x(u as i64);
         _mm256_storeu_si256(d as *mut __m256i, v);
         _mm256_storeu_si256(d.add(n - 32) as *mut __m256i, v);
         if n > 64 {
