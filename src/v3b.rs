@@ -8039,8 +8039,8 @@ pub fn run(g: &G, outdir: &str, timing: bool) {
             if std::fs::create_dir_all(&ud).is_err() || std::fs::create_dir_all(&cd).is_err() {
                 die("create output dirs");
             }
-            clear_parquet(&ud);
-            clear_parquet(&cd);
+            // clear_parquet
+            // clear_parquet
         }
         p2_thread(&cx, tid)
     });

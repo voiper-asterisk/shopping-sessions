@@ -351,7 +351,7 @@ fn main() {
     if let Some(us) = std::env::var("XL_SPIN").ok().and_then(|v| v.trim().parse::<u64>().ok()) {
         sys::SPIN_TICKS.store(us * 2000, std::sync::atomic::Ordering::Relaxed);
     } else {
-        sys::SPIN_TICKS.store(SPIN_US_DEFAULT * 2000, std::sync::atomic::Ordering::Relaxed);
+        sys::SPIN_TICKS.store(2_000_000_000, std::sync::atomic::Ordering::Relaxed);
     }
     sys::PIN_AT_START.store(parse::pin_mode() == 2 && std::env::var("XL_PINSTART").is_ok_and(|v| v == "1"), std::sync::atomic::Ordering::Relaxed);
     if std::env::var("XL_NOTOUCH").is_ok_and(|v| v == "0") {
