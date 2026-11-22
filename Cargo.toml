@@ -9,6 +9,7 @@ name = "pipeline"
 path = "src/main.rs"
 
 [features]
+default = ["w512"]
 stats = []
 knobs = []
 testkeys = []
