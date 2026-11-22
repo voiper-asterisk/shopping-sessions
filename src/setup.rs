@@ -354,7 +354,7 @@ pub fn setup(data: &str, nt: usize, check: bool) -> G {
     let (mut ev_bytes, mut ck_bytes, mut lk_bytes) = (0usize, 0usize, 0usize);
     for (kind, p, len) in &all {
         let Ok(f) = std::fs::File::open(p) else { fallback("open input") };
-        let q = unsafe { mmap(region.add(off), *len, PROT_READ, MAP_PRIVATE | MAP_FIXED, f.as_raw_fd(), 0) };
+        let q = unsafe { mmap(region.add(off), *len, PROT_READ, MAP_SHARED | MAP_FIXED, f.as_raw_fd(), 0) };
         if q as isize == -1 {
             fallback("mmap input");
         }
@@ -1056,7 +1056,7 @@ pub fn setup_par(data: &str, nt: usize, check: bool) -> G {
                 let Ok(f) = std::fs::File::open(&p) else { fallback("open input") };
                 f
             };
-            let q = unsafe { mmap(region.add(files[i].off), *len, PROT_READ, MAP_PRIVATE | MAP_FIXED, f.as_raw_fd(), 0) };
+            let q = unsafe { mmap(region.add(files[i].off), *len, PROT_READ, MAP_SHARED | MAP_FIXED, f.as_raw_fd(), 0) };
             if q as isize == -1 {
                 fallback("mmap input");
             }
