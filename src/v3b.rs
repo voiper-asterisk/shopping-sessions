@@ -1931,8 +1931,13 @@ impl SBins {
         }
         unsafe {
             let one = _mm_setr_epi32(0, 0, 1, 0);
+            let mut sm = self.sm;
             for rel in it {
                 let bi = (rel / GAP_MS as u32) as usize;
+                let w_idx = bi >> 6;
+                if w_idx < 64 {
+                    sm |= 1u64 << w_idx;
+                }
                 *occ.add(bi) = 0xFF;
                 let p = bp.add(bi) as *mut __m128i;
                 let v = _mm_loadu_si128(p);
@@ -1940,6 +1945,7 @@ impl SBins {
                 let x = _mm_blend_epi32::<0b0010>(_mm_min_epu32(v, r), _mm_max_epu32(v, r));
                 _mm_storeu_si128(p, _mm_blend_epi32::<0b1100>(x, _mm_add_epi32(v, one)));
             }
+            self.sm = sm;
         }
         if pm {
             pkpm::lap(&mut pl, 6);
@@ -7267,8 +7273,10 @@ unsafe fn scan_bins(op: *mut u8, bp: *mut Bin, nw: usize, sm: u64, sp: *mut Sess
     }
     let mut wm = [std::mem::MaybeUninit::<[u64; 2]>::uninit(); 65];
     let wp = wm.as_mut_ptr() as *mut [u64; 2];
-    let _ = sm;
-    for wi in 0..nw {
+    let mut cur_sm = sm;
+    while cur_sm != 0 {
+        let wi = cur_sm.trailing_zeros() as usize;
+        cur_sm &= cur_sm - 1;
         let m = word!(wi);
         *wp.add(k) = [m, bp.add(wi * 64) as u64];
         k += (m != 0) as usize;

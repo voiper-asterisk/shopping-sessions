@@ -1866,14 +1866,27 @@ unsafe fn cp_bwd(d: *mut u8, s: *const u8, n: usize) {
     );
 }
 #[inline(always)]
+unsafe fn vex_broadcast_u64_ymm(val: u64) -> std::arch::x86_64::__m256i {
+    let res: std::arch::x86_64::__m256i;
+    std::arch::asm!(
+        "vmovq {x}, {r}",
+        "vpbroadcastq {y}, {x}",
+        r = in(reg) val,
+        x = out(xmm_reg) _,
+        y = out(ymm_reg) res,
+        options(pure, nomem, nostack),
+    );
+    res
+}
+
+#[inline(always)]
 unsafe fn set_big(d: *mut u8, b: u8, n: usize) {
     #[cfg(feature = "w512")]
     std::arch::asm!("rep stosb", inout("rcx") n => _, inout("rdi") d => _, in("al") b, options(nostack, preserves_flags));
     #[cfg(not(feature = "w512"))]
     {
-        use std::arch::x86_64::*;
         let u = 0x0101_0101_0101_0101u64 * b as u64;
-        let v = _mm256_set1_epi64x(u as i64);
+        let v = vex_broadcast_u64_ymm(u);
         if n >= NT_MIN {
             std::arch::asm!(
                 "vmovdqu ymmword ptr [{d}], {v}",
@@ -1969,7 +1982,7 @@ pub unsafe extern "C" fn memset(d: *mut std::ffi::c_void, c: i32, n: usize) -> *
         }
     } else if n <= 128 {
         let u = 0x0101_0101_0101_0101u64 * b as u64;
-        let v = _mm256_set1_epi64x(u as i64);
+        let v = vex_broadcast_u64_ymm(u);
         _mm256_storeu_si256(d as *mut __m256i, v);
         _mm256_storeu_si256(d.add(n - 32) as *mut __m256i, v);
         if n > 64 {
