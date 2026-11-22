@@ -1,14 +1,12 @@
-# Shopping Sessions: Team FAST native static binary
-FROM rust:1.85-slim-bookworm AS build
+FROM rust:1.100.0-slim-trixie@sha256:6f14b2b4b278ec0d50aa1d69541c304ce0f95e0f6268487aa9924af1c2e9aebe AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
-COPY src ./src
-ENV RUSTFLAGS="-C target-cpu=x86-64-v3 -C target-feature=+crt-static"
-RUN cargo build --release --locked --target x86_64-unknown-linux-gnu && \
-    strip /src/target/x86_64-unknown-linux-gnu/release/shopping-sessions
+COPY .cargo .cargo
+COPY src src
+RUN cargo build --release --features w512 --target x86_64-unknown-linux-gnu \
+ && cp target/x86_64-unknown-linux-gnu/release/pipeline /pipeline
 
 FROM scratch
-COPY --from=build /src/target/x86_64-unknown-linux-gnu/release/shopping-sessions /shopping-sessions
+COPY --from=build /pipeline /pipeline
 USER 1000:1000
-ENV DATA_DIR=/data OUTPUT_DIR=/output SCRATCH_DIR=/scratch
-CMD ["/shopping-sessions"]
+CMD ["/pipeline"]

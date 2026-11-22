@@ -1,11 +1,22 @@
 [package]
-name = "shopping-sessions"
+name = "pipeline"
 version = "0.1.0"
 edition = "2021"
+publish = false
 
 [[bin]]
-name = "shopping-sessions"
+name = "pipeline"
 path = "src/main.rs"
+
+[features]
+default = ["w512"]
+stats = []
+knobs = []
+testkeys = []
+pmu = []
+tl = []
+sp = []
+w512 = []
 
 [dependencies]
 

@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "shopping-sessions"
+name = "pipeline"
 version = "0.1.0"
