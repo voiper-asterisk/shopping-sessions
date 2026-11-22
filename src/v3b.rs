@@ -1906,7 +1906,7 @@ struct Bin {
 }
 const BIN0: Bin = Bin { mn: u32::MAX, mx: 0, cnt: 0, si: 0 };
 struct SBins {
-    occ: Vec<u8>,
+    masks: Vec<u64>,
     b: Vec<Bin>,
     cs: Vec<u64>,
     rw: Vec<[u64; 2]>,
@@ -1918,12 +1918,12 @@ impl SBins {
     fn new(wlen: u64) -> SBins {
         let nb = (wlen / GAP_MS as u64) as usize + 2;
         let nw = nb.div_ceil(64);
-        SBins { occ: vec![0; nw * 64], b: vec![BIN0; nw * 64], cs: Vec::new(), rw: Vec::with_capacity(nw * 64 + 2), sm: 0, rv: Vec::new(), tp: Vec::new() }
+        SBins { masks: vec![0; nw], b: vec![BIN0; nw * 64], cs: Vec::new(), rw: Vec::with_capacity(nw * 64 + 2), sm: 0, rv: Vec::new(), tp: Vec::new() }
     }
     #[inline(always)]
     fn add(&mut self, it: impl Iterator<Item = u32>) {
         use std::arch::x86_64::*;
-        let (occ, bp) = (self.occ.as_mut_ptr(), self.b.as_mut_ptr());
+        let (masks, bp) = (self.masks.as_mut_ptr(), self.b.as_mut_ptr());
         let pm = pkpm::on();
         let mut pl = [0u64; 3];
         if pm {
@@ -1936,9 +1936,9 @@ impl SBins {
                 let bi = (rel / GAP_MS as u32) as usize;
                 let w_idx = bi >> 6;
                 if w_idx < 64 {
+                    *masks.add(w_idx) |= 1u64 << (bi & 63);
                     sm |= 1u64 << w_idx;
                 }
-                *occ.add(bi) = 0xFF;
                 let p = bp.add(bi) as *mut __m128i;
                 let v = _mm_loadu_si128(p);
                 let r = _mm_set1_epi32(rel as i32);
@@ -7218,9 +7218,7 @@ mod pkpm {
 }
 
 #[inline(never)]
-unsafe fn scan_bins(op: *mut u8, bp: *mut Bin, nw: usize, sm: u64, sp: *mut Sess, rp: *mut [u64; 2], dbase: i32, woff: u64, ws: i64) -> (usize, usize) {
-    use std::arch::x86_64::*;
-    let z = _mm256_setzero_si256();
+unsafe fn scan_bins(masks: *mut u64, bp: *mut Bin, nw: usize, sm: u64, sp: *mut Sess, rp: *mut [u64; 2], dbase: i32, woff: u64, ws: i64) -> (usize, usize) {
     let mut ms = [std::mem::MaybeUninit::<u64>::uninit(); 65];
     let mut mb = [std::mem::MaybeUninit::<u32>::uninit(); 65];
     let msp = ms.as_mut_ptr() as *mut u64;
@@ -7229,10 +7227,8 @@ unsafe fn scan_bins(op: *mut u8, bp: *mut Bin, nw: usize, sm: u64, sp: *mut Sess
     let mut total = 0usize;
     macro_rules! word {
         ($wi:expr) => {{
-            let p = op.add($wi * 64);
-            let m = (_mm256_movemask_epi8(_mm256_loadu_si256(p as *const _)) as u32 as u64) | opq64(_mm256_movemask_epi8(_mm256_loadu_si256(p.add(32) as *const _)) as u32 as u64) << 32;
-            _mm256_storeu_si256(p as *mut _, z);
-            _mm256_storeu_si256(p.add(32) as *mut _, z);
+            let m = *masks.add($wi);
+            *masks.add($wi) = 0;
             m
         }};
     }
@@ -7486,7 +7482,7 @@ fn walk_person(g: &G, odds: &[Vec<u8>], t: &mut T3, w: &mut Walk, cside: &[Key],
         if pm {
             pkpm::lap(&mut pl, 1);
         }
-        let (ns, nr) = scan_bins(t.sb.occ.as_mut_ptr(), t.sb.b.as_mut_ptr(), nbins / 64, t.sb.sm, t.sess.as_mut_ptr(), rp, dbase, woff, ws);
+        let (ns, nr) = scan_bins(t.sb.masks.as_mut_ptr(), t.sb.b.as_mut_ptr(), nbins / 64, t.sb.sm, t.sess.as_mut_ptr(), rp, dbase, woff, ws);
         t.sb.sm = 0;
         if pm {
             pkpm::lap(&mut pl, 9);
@@ -8046,15 +8042,13 @@ pub fn run(g: &G, outdir: &str, timing: bool) {
     let out = std::path::Path::new(outdir);
     let ud = out.join("user_daily");
     let cd = out.join("campaign_daily");
+    if std::fs::create_dir_all(&ud).is_err() || std::fs::create_dir_all(&cd).is_err() {
+        die("create output dirs");
+    }
+    clear_parquet(&ud);
+    clear_parquet(&cd);
     cx.next.store(0, Ordering::Relaxed);
     run_par(nt, |tid| {
-        if tid == nt - 1 {
-            if std::fs::create_dir_all(&ud).is_err() || std::fs::create_dir_all(&cd).is_err() {
-                die("create output dirs");
-            }
-            clear_parquet(&ud);
-            clear_parquet(&cd);
-        }
         p2_thread(&cx, tid)
     });
     lap("p2");

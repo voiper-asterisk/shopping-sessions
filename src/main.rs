@@ -424,7 +424,7 @@ fn main() {
             }
             eprintln!("[v3b] setup ms: {s}; exit at {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
         }
-        match std::env::var("XL_PMX").ok().and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(2) {
+        match std::env::var("XL_PMX").ok().and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(0) {
             1 => sys::exit_release(g.nt, unsafe { &parse::FDS }),
             2 => sys::exit_release_pieces(g.nt, unsafe { &parse::FDS }),
             _ => {}
