@@ -2117,8 +2117,6 @@ unsafe fn mulu_ymm(a: std::arch::x86_64::__m256i, b: std::arch::x86_64::__m256i)
 }
 
 const EVR: usize = NB + 8;
-const SINKV: u32 = 3;
-const SINKPF: usize = 8;
 #[inline(never)]
 unsafe fn ev_se(w: &mut ELane, eb: &EvBatch, r: *const u64, sei: *const u64, nse: usize) -> u64 {
     let mut bad = 0u64;
@@ -2438,42 +2436,22 @@ impl<'a, 'b> Sink<'a, 'b> {
                     nse += k_se.count_ones() as usize;
                     _mm256_storeu_si256(lei.add(nle) as *mut _, _mm256_maskz_compress_epi64(k_le, idx));
                     nle += k_le.count_ones() as usize;
+                    _mm256_storeu_si256(xli.add(nxl) as *mut _, _mm256_maskz_compress_epi64(k_xl, idx));
+                    nxl += k_xl.count_ones() as usize;
                     let k_pf = (k_se | k_le | k_xl) & k_purch & k_valid;
+                    _mm256_storeu_si256(pfi.add(npf) as *mut _, _mm256_maskz_compress_epi64(k_pf, idx));
+                    npf += k_pf.count_ones() as usize;
                     let k_w = !k_s & !k_se & !k_le & !k_xl & rows;
-                    if SINKV & 1 == 0 {
-                        _mm256_storeu_si256(xli.add(nxl) as *mut _, _mm256_maskz_compress_epi64(k_xl, idx));
-                        nxl += k_xl.count_ones() as usize;
-                        _mm256_storeu_si256(pfi.add(npf) as *mut _, _mm256_maskz_compress_epi64(k_pf, idx));
-                        npf += k_pf.count_ones() as usize;
-                        _mm256_storeu_si256(wi.add(nwd) as *mut _, _mm256_maskz_compress_epi64(k_w, idx));
-                        nwd += k_w.count_ones() as usize;
-                    } else if (k_xl | k_pf | k_w) != 0 {
-                        _mm256_storeu_si256(xli.add(nxl) as *mut _, _mm256_maskz_compress_epi64(k_xl, idx));
-                        nxl += k_xl.count_ones() as usize;
-                        _mm256_storeu_si256(pfi.add(npf) as *mut _, _mm256_maskz_compress_epi64(k_pf, idx));
-                        npf += k_pf.count_ones() as usize;
-                        _mm256_storeu_si256(wi.add(nwd) as *mut _, _mm256_maskz_compress_epi64(k_w, idx));
-                        nwd += k_w.count_ones() as usize;
-                    }
+                    _mm256_storeu_si256(wi.add(nwd) as *mut _, _mm256_maskz_compress_epi64(k_w, idx));
+                    nwd += k_w.count_ones() as usize;
                     idx = _mm256_add_epi64(idx, v_four);
                     i += 4;
                 }
             }
             let c1 = if prof { core::arch::x86_64::_rdtsc() } else { 0 };
             let mut sc = self.e.es.cursor();
-            if SINKV & 2 != 0 {
-                for k in 0..SINKPF {
-                    *sp.add(ns + k) = 0;
-                }
-                let pool = sc.pool as *const i8;
-                for j in 0..ns {
-                    _mm_prefetch::<_MM_HINT_ET0>(pool.add(*sp.add(j + SINKPF) as usize * 64));
-                    sc.push2(*sp.add(j) as usize, _mm_loadu_si128(sr.add(2 * j) as *const _));
-                }
-            } else {
-                for j in 0..ns {
-                    sc.push2(*sp.add(j) as usize, _mm_loadu_si128(sr.add(2 * j) as *const _));
-                }
+            for j in 0..ns {
+                sc.push2(*sp.add(j) as usize, _mm_loadu_si128(sr.add(2 * j) as *const _));
             }
             self.e.es.put(sc);
             if prof {
@@ -3293,7 +3271,8 @@ fn links_fast(cx: &Cx, odds: &[Vec<u8>], s: u64, check: bool, tk: &mut std::time
     let rb = 42 - b2;
     let n_ss: usize = (0..nt).map(|t| lk_ss(cx, t).len()).sum();
     let n_w: usize = (0..nt).map(|t| lk_w(cx, t).len()).sum();
-    let total = (np as u64 + 1) * s + 2 * n_w as u64 + 2 * LKPF as u64;
+    const D: usize = 16;
+    let total = (np as u64 + 1) * s + 2 * n_w as u64 + 2 * D as u64;
     if total >= u32::MAX as u64 {
         fallback("too many link ids");
     }
@@ -3356,17 +3335,6 @@ fn links_fast(cx: &Cx, odds: &[Vec<u8>], s: u64, check: bool, tk: &mut std::time
                         }
                     }
                 }
-                for (j, &(a, b)) in blk.iter().enumerate() {
-                    for (jj, k) in [a, b].into_iter().enumerate() {
-                        if !is_short(k) {
-                            let e = *wtab.get_unchecked(hs[2 * j + jj] as usize & wmask) as usize;
-                            if e != 0 {
-                                lk_pf(wkeys.as_ptr().add(e - 1));
-                                lk_pf(t.nd.add(ns + e - 1));
-                            }
-                        }
-                    }
-                }
 
                 for (j, &(a, b)) in blk.iter().enumerate() {
                     for (jj, k) in [a, b].into_iter().enumerate() {
@@ -3396,11 +3364,7 @@ fn links_fast(cx: &Cx, odds: &[Vec<u8>], s: u64, check: bool, tk: &mut std::time
                             }
                         };
                         sl[2 * j + jj] = x;
-                        let p = *t.nd.add(x as usize) as u32 as usize;
-                        lk_pf(t.nd.add(p));
-                        if p >= ns {
-                            lk_pf(wkeys.as_ptr().add(p - ns));
-                        }
+                        lk_pf(t.nd.add(*t.nd.add(x as usize) as u32 as usize));
                     }
                 }
                 for j in 0..blk.len() {
@@ -3440,128 +3404,77 @@ fn links_fast(cx: &Cx, odds: &[Vec<u8>], s: u64, check: bool, tk: &mut std::time
         word[wst[q + 1] as usize] = i as u32;
         wst[q + 1] += 1;
     }
-    lk_release(wtab);
-    let (nd, magic) = (nodes.as_ptr() as *const AtomicU64, t.magic);
-    let cap = s as usize + (0..np).map(|q| (wst[q + 1] - wst[q]) as usize).max().unwrap_or(0);
-    let mut part = Vec::with_capacity(nt);
-    for _ in 0..nt {
-        part.push(UnsafeCell::new(Vec::with_capacity(cap)));
+    let bk = unsafe { &mut *cx.bk.get() };
+    let mut lkf: Vec<(Key, Key)> = Vec::with_capacity(2 * (n_ss + n_w));
+    let out = lkf.as_mut_ptr();
+    let mut pos = 0usize;
+    let mut ids = mw;
+    unsafe {
+        use std::arch::x86_64::*;
+        let key = |x: u32| if (x as usize) < ns { Key { hi: 0, lo: t.skey(x) } } else { wkeys[x as usize - ns] };
+        let rep = bk.rep.as_mut_ptr() as *mut u64;
+        let s = s as usize;
+        let z = _mm256_setzero_si256();
+        let used = |x: usize| {
+            let p = t.nd.add(x) as *const __m256i;
+            _mm256_cmpneq_epi64_mask(_mm256_loadu_si256(p), z) as u32 | opq(_mm256_cmpneq_epi64_mask(_mm256_loadu_si256(p.add(1)), z) as u32) << 4
+        };
+        for q in 0..np {
+            bk.lko[q] = pos;
+            let base = (q + 1) * s;
+            let mut g = 0usize;
+            while g < s {
+                for k in 0..8 {
+                    lk_pf(t.nd.add(*t.nd.add(base + g + D + k) as u32 as usize));
+                }
+                let mut m = used(base + g);
+                if g + 8 > s {
+                    m &= (1u32 << (s - g)) - 1;
+                }
+                ids += m.count_ones() as usize;
+                while m != 0 {
+                    let x = base + g + m.trailing_zeros() as usize;
+                    m &= m - 1;
+                    let e = *t.nd.add(x);
+                    let r = t.find(x as u32);
+                    if r as usize != x {
+                        out.add(pos).write((Key { hi: 0, lo: unmix42((q as u64) << rb | e >> 32) }, key(r)));
+                        pos += 1;
+                    } else {
+                        let ix = rep_ix_short((e >> 32) as u32);
+                        *rep.add((q << (RBB - 6)) + (ix >> 6)) |= 1u64 << (ix & 63);
+                    }
+                }
+                g += 8;
+            }
+            let wl = &word[wst[q] as usize..wst[q + 1] as usize];
+            for (j, &i) in wl.iter().enumerate() {
+                if j + 8 < wl.len() {
+                    lk_pf(t.nd.add(*t.nd.add(ns + wl[j + 8] as usize) as u32 as usize));
+                }
+                let x = ns as u32 + i;
+                let r = t.find(x);
+                if r != x {
+                    out.add(pos).write((wkeys[i as usize], key(r)));
+                    pos += 1;
+                } else {
+                    let (w, m) = rep_slot(wkeys[i as usize], b2);
+                    *rep.add(w) |= m;
+                }
+            }
+        }
+        bk.lko[np] = pos;
+        lkf.set_len(pos);
     }
-    unsafe { *std::ptr::addr_of_mut!(LKD) = Some(LkD { nd, _nodes: nodes, wkeys, word, wst, s: s as usize, ns, magic, part }) };
+    bk.lkf = lkf;
+    lk_release(nodes);
+    lk_release(wtab);
+    lk_release(wkeys);
     tm[2] += tick(tk);
     if std::env::var("XL_TIMING").is_ok() {
-        eprintln!("[v3b] links: pairs={} slots={s} other={mw} us: uf={} wide={} out={}", n_ss + n_w, tm[0] / 1000, tm[1] / 1000, tm[2] / 1000);
+        eprintln!("[v3b] links: pairs={} ids={ids} moved={pos} slots={s} other={mw} us: uf={} wide={} out={}", n_ss + n_w, tm[0] / 1000, tm[1] / 1000, tm[2] / 1000);
     }
     true
-}
-
-struct LkD {
-    nd: *const AtomicU64,
-    _nodes: Vec<u64>,
-    wkeys: Vec<Key>,
-    word: Vec<u32>,
-    wst: Vec<u32>,
-    s: usize,
-    ns: usize,
-    magic: u64,
-    part: Vec<UnsafeCell<Vec<(Key, Key)>>>,
-}
-static mut LKD: Option<LkD> = None;
-#[inline(always)]
-fn lkd() -> Option<&'static LkD> {
-    unsafe { (*std::ptr::addr_of!(LKD)).as_ref() }
-}
-#[inline(always)]
-unsafe fn lk_find(nd: *const AtomicU64, mut x: u32) -> u32 {
-    loop {
-        let e = (*nd.add(x as usize)).load(Ordering::Relaxed);
-        let p = e as u32;
-        let g = (*nd.add(p as usize)).load(Ordering::Relaxed) as u32;
-        if g == p {
-            return p;
-        }
-        (*nd.add(x as usize)).store((e & !0xFFFF_FFFF) | g as u64, Ordering::Relaxed);
-        x = g;
-    }
-}
-const LKPF: usize = 32;
-unsafe fn lk_part(d: &LkD, q: usize, b2: u32, out: &mut Vec<(Key, Key)>, rep: &[AtomicU64]) {
-    let rb = 42 - b2;
-    let (nd, s, ns) = (d.nd, d.s, d.ns);
-    let ld = |x: usize| (*nd.add(x)).load(Ordering::Relaxed);
-    let key = |r: u32| {
-        if (r as usize) < ns {
-            let qr = ((r as u128 * d.magic as u128) >> 64) as u64 - 1;
-            Key { hi: 0, lo: unmix42(qr << rb | ld(r as usize) >> 32) }
-        } else {
-            *d.wkeys.get_unchecked(r as usize - ns)
-        }
-    };
-    let bit = |w: usize, m: u64| {
-        let a = rep.get_unchecked(w);
-        a.store(a.load(Ordering::Relaxed) | m, Ordering::Relaxed);
-    };
-    let wl = &d.word[d.wst[q] as usize..d.wst[q + 1] as usize];
-    out.clear();
-    out.reserve(s + wl.len());
-    let o = out.as_mut_ptr();
-    let mut pos = 0usize;
-    let base = (q + 1) * s;
-    let mut g = 0usize;
-    while g < s {
-        for k in 0..8 {
-            lk_pf(nd.add(ld(base + g + LKPF + k) as u32 as usize));
-            lk_pf(nd.add(ld(ld(base + g + LKPF / 2 + k) as u32 as usize) as u32 as usize));
-        }
-        let (mut m0, mut m1) = (0u32, 0u32);
-        for k in 0..4 {
-            m0 |= ((ld(base + g + k) != 0) as u32) << k;
-        }
-        for k in 0..4 {
-            m1 |= ((ld(base + g + 4 + k) != 0) as u32) << k;
-        }
-        let mut m = m0 | opq(m1) << 4;
-        if g + 8 > s {
-            m &= (1u32 << (s - g)) - 1;
-        }
-        while m != 0 {
-            let x = base + g + m.trailing_zeros() as usize;
-            m &= m - 1;
-            let e = ld(x);
-            let r = lk_find(nd, x as u32);
-            if r as usize != x {
-                o.add(pos).write((Key { hi: 0, lo: unmix42((q as u64) << rb | e >> 32) }, key(r)));
-                pos += 1;
-            } else {
-                let ix = rep_ix_short((e >> 32) as u32);
-                bit((q << (RBB - 6)) + (ix >> 6), 1u64 << (ix & 63));
-            }
-        }
-        g += 8;
-    }
-    for (j, &i) in wl.iter().enumerate() {
-        if j + 16 < wl.len() {
-            let i2 = *wl.get_unchecked(j + 16) as usize;
-            lk_pf(nd.add(ns + i2));
-            lk_pf(d.wkeys.as_ptr().add(i2));
-            let p = ld(ns + *wl.get_unchecked(j + 8) as usize) as u32 as usize;
-            lk_pf(nd.add(p));
-            if p >= ns {
-                lk_pf(d.wkeys.as_ptr().add(p - ns));
-            }
-        }
-        let x = ns as u32 + i;
-        let r = lk_find(nd, x);
-        let k = *d.wkeys.get_unchecked(i as usize);
-        if r != x {
-            o.add(pos).write((k, key(r)));
-            pos += 1;
-        } else {
-            let (w, m) = rep_slot(k, b2);
-            bit(w, m);
-        }
-    }
-    out.set_len(pos);
 }
 
 fn links_check(cx: &Cx, odds: &[Vec<u8>]) {
@@ -3624,14 +3537,10 @@ fn links_check(cx: &Cx, odds: &[Vec<u8>]) {
             rep[w] |= mk;
         }
     }
-    let Some(d) = lkd() else { die("links check (no table)") };
-    let got: Vec<AtomicU64> = (0..rep.len()).map(|_| AtomicU64::new(0)).collect();
-    let mut moved = 0usize;
+    let bk = unsafe { &*cx.bk.get() };
     let ord = |e: &(Key, Key)| (e.0.hi, e.0.lo);
     for q in 0..np {
-        let mut have: Vec<(Key, Key)> = Vec::new();
-        unsafe { lk_part(d, q, b2, &mut have, &got) };
-        moved += have.len();
+        let mut have = bk.lkf[bk.lko[q]..bk.lko[q + 1]].to_vec();
         have.sort_by_key(ord);
         want[q].sort_by_key(ord);
         if have != want[q] {
@@ -3639,10 +3548,10 @@ fn links_check(cx: &Cx, odds: &[Vec<u8>]) {
             die("links check");
         }
     }
-    if (0..rep.len()).any(|w| got[w].load(Ordering::Relaxed) != rep[w]) {
+    if bk.lko[np] != bk.lkf.len() || (0..rep.len()).any(|w| bk.rep[w].load(Ordering::Relaxed) != rep[w]) {
         die("links check (bitmap)");
     }
-    eprintln!("[v3b] links check ok: pairs={n} ids={m} moved={moved}");
+    eprintln!("[v3b] links check ok: pairs={n} ids={m} moved={}", bk.lkf.len());
 }
 
 #[inline(always)]
@@ -4663,7 +4572,6 @@ fn link_tab(tab: &mut Tab, l: &[(Key, Key)]) {
 }
 
 const RBB: u32 = 14;
-#[allow(dead_code)]
 struct Back {
     lkf: Vec<(Key, Key)>,
     lko: Vec<usize>,
@@ -5614,14 +5522,7 @@ fn p1_thread(cx: &Cx, tid: usize) {
         let B3 { blk, es, ps, cside, flat, sl, w, pm, ut, lkix, homes, lrep, ldir, ub, base, c4, lmov, .. } = &mut *b;
         let mut pl = [0u64; 3];
         pm3::lap(pm, &mut pl, 15);
-        let l: &[(Key, Key)] = match lkd() {
-            Some(d) => unsafe {
-                let v = &mut *d.part[tid].get();
-                lk_part(d, q, b2, v, &bk.rep);
-                &v[..]
-            },
-            None => &[],
-        };
+        let l = &bk.lkf[bk.lko[q]..bk.lko[q + 1]];
         if l.len() >= u32::MAX as usize {
             fallback("too many links in a partition");
         }
