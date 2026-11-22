@@ -9,7 +9,6 @@ name = "pipeline"
 path = "src/main.rs"
 
 [features]
-default = ["w512"]
 stats = []
 knobs = []
 testkeys = []
@@ -26,4 +25,3 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 debug = false
-strip = true
